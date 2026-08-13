@@ -58,19 +58,30 @@ class Capture:
         self.mic = AudioRing(config.RING_SAMPLES)
         self.sys = AudioRing(config.RING_SAMPLES)
         self._pa: pyaudio.PyAudio | None = None
-        self._streams: list = []
+        self._streams: list[pyaudio.Stream] = []
 
     def start(self) -> None:
         pa = pyaudio.PyAudio()
         self._pa = pa
-        # Resolve both devices before opening either, so a missing one fails
-        # before we have a half-started capture to unwind.
-        mic = _mic_device(pa)
-        spk = _loopback_device(pa)
-        self._streams.append(self._open(pa, mic, self.mic))
-        self._streams.append(self._open(pa, spk, self.sys))
+        try:
+            # Resolve both devices before opening either, so a missing one
+            # fails before either stream exists.
+            mic = _mic_device(pa)
+            spk = _loopback_device(pa)
+            self._streams.append(self._open(pa, mic, self.mic))
+            self._streams.append(self._open(pa, spk, self.sys))
+        except Exception:
+            # Leave nothing running. Resolving devices first is not enough on
+            # its own: the second _open can fail with the first stream
+            # already live and capturing, and a caller retrying start() in a
+            # loop — waiting for a mic to be plugged in — would leak a
+            # PyAudio session on every attempt.
+            self.stop()
+            raise
 
-    def _open(self, pa: pyaudio.PyAudio, device: dict, ring: AudioRing):
+    def _open(
+        self, pa: pyaudio.PyAudio, device: dict, ring: AudioRing
+    ) -> pyaudio.Stream:
         # `pa` is passed rather than read off self: self._pa is Optional, and
         # relying on call order to know it is set is exactly the assumption a
         # type checker cannot verify and a refactor quietly breaks.
@@ -79,7 +90,7 @@ class Capture:
         name = device["name"]
         errors = 0
 
-        def callback(in_data, frame_count, time_info, status):
+        def callback(in_data, frame_count, time_info, status) -> tuple[None, int]:
             # Must return fast: this is the WASAPI thread, and stalling it
             # causes audible dropouts in the call itself.
             #
