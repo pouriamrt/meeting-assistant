@@ -135,7 +135,14 @@ class Overlay:
             borderwidth=0,
             highlightthickness=0,
         )
-        entry.pack(fill="x", side="bottom", padx=14, pady=(0, 12))
+        # `before=self.text` is load-bearing, not cosmetic. self.text is
+        # packed with expand=True/fill=both, so it claims the whole cavity;
+        # anything packed after it is allocated nothing and silently stays
+        # unmapped at 1x1 - pack() succeeds, the widget never appears, and
+        # the typed-query hotkey looks like it does nothing at all.
+        entry.pack(
+            side="bottom", fill="x", padx=14, pady=(0, 12), before=self.text
+        )
         entry.focus_set()
 
         def submit(_event: "tk.Event | None" = None) -> None:

@@ -546,6 +546,7 @@ class _FakeEntry:
         self.master = master
         self.kwargs = kwargs
         self.packed = False
+        self.pack_kwargs = {}
         self.focused = False
         self.destroyed = False
         self.bindings = {}
@@ -553,6 +554,7 @@ class _FakeEntry:
 
     def pack(self, **kwargs):
         self.packed = True
+        self.pack_kwargs = kwargs
 
     def focus_set(self):
         self.focused = True
@@ -582,6 +584,7 @@ def _bare_overlay():
     syscall - so _drain's message handling can be unit tested in isolation."""
     ov = overlay_mod.Overlay.__new__(overlay_mod.Overlay)
     ov.root = object()  # never touched except as the fake Entry's master
+    ov.text = object()  # the entry packs relative to it; identity is all we need
     ov._entry = None
     ov._alive = False  # skip _drain's after() reschedule, no real Tk loop
     return ov
@@ -595,6 +598,11 @@ def test_prompt_message_opens_one_inline_entry_in_the_root(monkeypatch):
     ov._drain()
 
     assert isinstance(ov._entry, _FakeEntry)
+    # `before` is what stops the entry being allocated zero space behind a
+    # widget packed with expand=True/fill=both. Without it pack() still
+    # succeeds and the entry silently never appears.
+    assert ov._entry.pack_kwargs.get("before") is ov.text
+    assert ov._entry.master is ov.root
     assert ov._entry.master is ov.root, "entry must live in the excluded root, not a new window"
     assert ov._entry.packed
     assert ov._entry.focused
@@ -709,3 +717,39 @@ def test_real_speech_is_not_mistaken_for_a_degenerate_decode():
     assert not tm._is_degenerate(real)
     assert not tm._is_degenerate("Yeah.")
     assert not tm._is_degenerate("")
+
+
+def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
+    # Regression. The entry was packed after a widget with expand=True and
+    # fill="both", which claims the entire cavity - pack() succeeded, the
+    # entry stayed unmapped at 1x1, and Ctrl+Shift+Space silently did
+    # nothing. Nothing in the suite checked that a widget was displayed, only
+    # that it existed, so this shipped through every review.
+    import queue as _queue
+    import tkinter as _tk
+
+    from assistant import config as _config
+
+    monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
+    from assistant.overlay import Overlay
+
+    try:
+        ov = Overlay(_queue.Queue())
+    except _tk.TclError as exc:            # no display available
+        pytest.skip(f"tk unavailable: {exc}")
+
+    try:
+        ov.root.attributes("-alpha", 0.0)
+        ov._open_query_entry(lambda _text: None)
+        ov.root.update_idletasks()
+
+        entry = ov._entry
+        assert entry is not None
+        assert entry.winfo_ismapped(), "entry was packed but never displayed"
+        assert entry.winfo_width() > 100, f"entry collapsed to {entry.winfo_width()}px"
+        assert entry.winfo_height() > 5, f"entry collapsed to {entry.winfo_height()}px"
+        # The whole point of an inline entry: a Toplevel would be a second
+        # HWND, and SetWindowDisplayAffinity is per-HWND and not inherited.
+        assert entry.winfo_toplevel() is ov.root
+    finally:
+        ov.root.destroy()
