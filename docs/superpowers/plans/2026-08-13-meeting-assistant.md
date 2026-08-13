@@ -853,12 +853,17 @@ def test_gate_loop_discards_pending_when_the_ring_reports_a_gap(monkeypatch):
     assert lengths == [16_000], "transcribed audio spanned the dropped region"
 
 
-def test_gate_loop_trims_pending_during_silence_and_emits_nothing(monkeypatch):
+def test_gate_loop_trims_pending_during_silence_and_emits_nothing(monkeypatch, caplog):
     monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
     monkeypatch.setattr(tm, "transcribe", lambda a: "should not be called")
     tr = Transcript(max_turns=10)
-    tm.gate_loop(FakeRing([(_silence(16_000 * 2), 0)]), "them", tr, StopAfter(4))
+    with caplog.at_level(logging.ERROR):
+        tm.gate_loop(FakeRing([(_silence(16_000 * 2), 0)]), "them", tr, StopAfter(4))
     assert len(tr) == 0
+    # The log assertion is what gives this test teeth. "No turn emitted" is
+    # equally true if the silence branch threw and the loop's except swallowed
+    # it, so without this the test passes on a broken trim.
+    assert not caplog.records, f"gate loop logged an error: {caplog.text}"
 
 
 def test_gate_loop_forces_a_close_at_the_max_utterance_length(monkeypatch):
