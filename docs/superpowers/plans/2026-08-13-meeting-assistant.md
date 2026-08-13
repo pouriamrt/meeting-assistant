@@ -497,6 +497,14 @@ def test_to_mono_16k_handles_an_empty_packet():
     out = to_mono_16k(b"", channels=2, src_rate=48_000)
     assert len(out) == 0
     assert out.dtype == np.float32
+
+
+def test_to_mono_16k_raises_on_a_truncated_packet():
+    # Documents why the stream callback guards. A partial frame is possible,
+    # and an unguarded raise on the WASAPI thread tears the stream down —
+    # capture would die mid-meeting with an empty transcript as the only sign.
+    with pytest.raises(ValueError):
+        to_mono_16k(b"\x00\x00\x00", channels=1, src_rate=16_000)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -514,12 +522,16 @@ Create `assistant/capture.py`:
 ```python
 """Dual WASAPI capture: microphone and system output, both to 16 kHz mono."""
 
+import logging
+
 import numpy as np
 import pyaudiowpatch as pyaudio
 import soxr
 
 from . import config
 from .audio_ring import AudioRing
+
+log = logging.getLogger(__name__)
 
 _FORMAT = pyaudio.paFloat32
 _FRAMES_PER_BUFFER = 1024
@@ -571,25 +583,46 @@ class Capture:
         self._streams: list = []
 
     def start(self) -> None:
-        self._pa = pyaudio.PyAudio()
+        pa = pyaudio.PyAudio()
+        self._pa = pa
         # Resolve both devices before opening either, so a missing one fails
         # before we have a half-started capture to unwind.
-        mic = _mic_device(self._pa)
-        spk = _loopback_device(self._pa)
-        self._streams.append(self._open(mic, self.mic))
-        self._streams.append(self._open(spk, self.sys))
+        mic = _mic_device(pa)
+        spk = _loopback_device(pa)
+        self._streams.append(self._open(pa, mic, self.mic))
+        self._streams.append(self._open(pa, spk, self.sys))
 
-    def _open(self, device: dict, ring: AudioRing):
+    def _open(self, pa: pyaudio.PyAudio, device: dict, ring: AudioRing):
+        # `pa` is passed rather than read off self: self._pa is Optional, and
+        # relying on call order to know it is set is exactly the assumption a
+        # type checker cannot verify and a refactor quietly breaks.
         rate = int(device["defaultSampleRate"])
         channels = int(device["maxInputChannels"])
+        name = device["name"]
+        errors = 0
 
         def callback(in_data, frame_count, time_info, status):
             # Must return fast: this is the WASAPI thread, and stalling it
             # causes audible dropouts in the call itself.
-            ring.write(to_mono_16k(in_data, channels, rate))
+            #
+            # It must also never raise. An exception here tears the stream
+            # down, so capture dies silently in the middle of a meeting and
+            # the first sign is an empty transcript. Dropping one buffer is
+            # always the smaller failure. Log the first failure and then
+            # every thousandth: a persistent fault stays visible without
+            # flooding the audio thread with logging calls.
+            nonlocal errors
+            try:
+                ring.write(to_mono_16k(in_data, channels, rate))
+            except Exception:
+                errors += 1
+                if errors == 1 or errors % 1000 == 0:
+                    log.exception(
+                        "capture failed on %s (%d buffers dropped)", name, errors
+                    )
             return (None, pyaudio.paContinue)
 
-        return self._pa.open(
+        return pa.open(
             format=_FORMAT,
             channels=channels,
             rate=rate,
