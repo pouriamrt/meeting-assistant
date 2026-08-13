@@ -108,8 +108,8 @@ becomes a goal.
 
 | File | Owns | Depends on |
 |---|---|---|
-| `capture.py` | dual WASAPI capture, two ring buffers | `pyaudiowpatch` |
-| `transcribe.py` | VAD gate, whisper worker, tagged transcript | `silero-vad`, `faster-whisper` |
+| `capture.py` | dual WASAPI capture, two ring buffers | `pyaudiowpatch`, `soxr` |
+| `transcribe.py` | VAD gate, whisper worker, tagged transcript | `faster-whisper` |
 | `prompts.py` | system prompt, humanizer block, mode tails | — |
 | `answer.py` | prompt assembly, cache breakpoints, streaming | `anthropic`, `prompts` |
 | `overlay.py` | always-on-top window, token painting, capture exclusion | `tkinter` |
@@ -119,6 +119,14 @@ becomes a goal.
 The transcript is one in-memory list of `Turn(src, text, ts)`, capped. `src` is
 `"them"` for loopback and `"me"` for mic. That tag is what makes "answer the last
 question they asked" possible at all. Nothing is persisted.
+
+Two dependency corrections found while planning, both verified against library
+documentation. There is no standalone `silero-vad` package: `faster-whisper`
+already ships the same Silero model on `onnxruntime` as
+`faster_whisper.vad.get_speech_timestamps`, and the standalone package would drag
+in `torch` and `torchaudio` to reach it. And `soxr` was missing entirely —
+WASAPI hands over the endpoint mix format, usually 48 kHz stereo, while whisper
+and Silero both require exactly 16 kHz mono. Nothing else converts between them.
 
 ## Model and request shape
 
