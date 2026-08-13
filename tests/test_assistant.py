@@ -393,3 +393,59 @@ def test_query_tail_embeds_the_typed_question():
     assert "how do you handle migrations" in prompts.query_tail(
         "how do you handle migrations"
     )
+
+
+# --- main wiring: latest-press-wins reentrancy guard ------------------------
+#
+# No GUI, no hotkeys, no audio device needed here: _AnswerGate is plain
+# counter-and-lock logic, and a fake queue exercises it exactly as
+# `answer.stream_answer` would.
+
+from assistant.main import _AnswerGate  # noqa: E402
+
+
+class _FakeQueue:
+    def __init__(self):
+        self.items = []
+
+    def put(self, item):
+        self.items.append(item)
+
+
+def test_answer_gate_drops_puts_from_a_superseded_generation():
+    gate = _AnswerGate()
+    fake = _FakeQueue()
+    first = gate.start(fake)
+    second = gate.start(fake)  # a second press supersedes the first
+
+    first.put(("token", "stale"))
+    second.put(("token", "live"))
+
+    assert fake.items == [("token", "live")]
+
+
+def test_answer_gate_does_not_discriminate_by_message_kind():
+    # The superseded generation's "clear" and "done" must be dropped too,
+    # not just its tokens - otherwise it could still blank or end the live
+    # answer's display.
+    gate = _AnswerGate()
+    fake = _FakeQueue()
+    first = gate.start(fake)
+    gate.start(fake)  # supersede
+
+    first.put(("clear", None))
+    first.put(("token", "stale"))
+    first.put(("done", None))
+
+    assert fake.items == []
+
+
+def test_answer_gate_lets_puts_through_before_any_later_press():
+    gate = _AnswerGate()
+    fake = _FakeQueue()
+    only = gate.start(fake)
+
+    only.put(("token", "a"))
+    only.put(("token", "b"))
+
+    assert fake.items == [("token", "a"), ("token", "b")]

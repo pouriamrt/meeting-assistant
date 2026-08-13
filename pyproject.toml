@@ -12,6 +12,9 @@ dependencies = [
     "soxr>=1.1.0",
 ]
 
+[project.scripts]
+meeting-assistant = "assistant.main:main"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
