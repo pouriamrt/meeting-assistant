@@ -774,6 +774,126 @@ def test_turn_is_frozen():
     turn = Turn(src="me", text="hello", ts=1.0)
     with pytest.raises(Exception):
         turn.text = "changed"
+
+
+# --- gate_loop -------------------------------------------------------------
+#
+# The loop carries two positions at once: `cursor` into the ring and `pending`
+# as a local accumulator. That interaction is the hardest logic in the project
+# and needs no hardware to test — a scripted ring and a stubbed VAD reach every
+# branch.
+
+import assistant.transcribe as tm  # noqa: E402
+
+
+class FakeRing:
+    """Hands out scripted (samples, start) pairs in place of a real ring."""
+
+    def __init__(self, reads):
+        self._reads = list(reads)
+
+    def read_from(self, abs_index):
+        if self._reads:
+            return self._reads.pop(0)
+        return np.zeros(0, dtype=np.float32), abs_index
+
+
+class StopAfter(threading.Event):
+    """Ends the loop after N waits, so it runs a bounded number of
+    iterations instantly instead of on a 200 ms timer."""
+
+    def __init__(self, n):
+        super().__init__()
+        self._left = n
+
+    def wait(self, timeout=None):
+        self._left -= 1
+        if self._left <= 0:
+            self.set()
+        return True
+
+
+def _spans_over_nonzero(buf):
+    """Stand-in for Silero: treats any nonzero sample as speech."""
+    nz = np.nonzero(buf)[0]
+    if len(nz) == 0:
+        return []
+    return [{"start": int(nz[0]), "end": int(nz[-1]) + 1}]
+
+
+def _speech(n):
+    return np.full(n, 0.5, dtype=np.float32)
+
+
+def _silence(n):
+    return np.zeros(n, dtype=np.float32)
+
+
+def test_gate_loop_emits_a_turn_when_trailing_silence_closes_an_utterance(monkeypatch):
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: "hello there")
+    reads = [(_speech(16_000), 0), (_silence(16_000), 16_000)]
+    tr = Transcript(max_turns=10)
+    tm.gate_loop(FakeRing(reads), "them", tr, StopAfter(4))
+    assert tr.render() == "[them] hello there"
+
+
+def test_gate_loop_discards_pending_when_the_ring_reports_a_gap(monkeypatch):
+    # The second read starts far past the cursor: audio was dropped. The
+    # partial utterance must be thrown away, not stitched across the gap.
+    lengths = []
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: lengths.append(len(a)) or "x")
+    reads = [
+        (_speech(16_000), 0),
+        (_speech(16_000), 16_000 * 5),   # gap: start >> cursor
+        (_silence(16_000), 16_000 * 6),
+    ]
+    tm.gate_loop(FakeRing(reads), "me", Transcript(max_turns=10), StopAfter(5))
+    assert lengths == [16_000], "transcribed audio spanned the dropped region"
+
+
+def test_gate_loop_trims_pending_during_silence_and_emits_nothing(monkeypatch):
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: "should not be called")
+    tr = Transcript(max_turns=10)
+    tm.gate_loop(FakeRing([(_silence(16_000 * 2), 0)]), "them", tr, StopAfter(4))
+    assert len(tr) == 0
+
+
+def test_gate_loop_forces_a_close_at_the_max_utterance_length(monkeypatch):
+    # An unbroken monologue never produces trailing silence; the length cap
+    # is what closes it.
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: "long answer")
+    tr = Transcript(max_turns=10)
+    reads = [(_speech(config.SAMPLE_RATE * config.MAX_UTTERANCE_S), 0)]
+    tm.gate_loop(FakeRing(reads), "them", tr, StopAfter(3))
+    assert tr.render() == "[them] long answer"
+
+
+def test_gate_loop_survives_a_decode_failure(monkeypatch):
+    # gate_loop runs on a daemon thread. An uncaught exception would kill it,
+    # leaving that source's transcription silently dead for the rest of the
+    # session — indistinguishable from nobody talking.
+    calls = []
+
+    def boom(_audio):
+        calls.append(1)
+        raise RuntimeError("ctranslate2 exploded")
+
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", boom)
+    reads = [
+        (_speech(16_000), 0),
+        (_silence(16_000), 16_000),
+        (_speech(16_000), 16_000 * 2),
+        (_silence(16_000), 16_000 * 3),
+    ]
+    tr = Transcript(max_turns=10)
+    tm.gate_loop(FakeRing(reads), "them", tr, StopAfter(9))
+    assert len(calls) >= 2, "the loop died after the first failure"
+    assert len(tr) == 0
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -791,6 +911,7 @@ Create `assistant/transcribe.py`:
 ```python
 """VAD-gated local transcription into a tagged in-memory transcript."""
 
+import logging
 import threading
 import time
 from collections import deque
@@ -801,6 +922,9 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 from . import config
+from .audio_ring import AudioRing
+
+log = logging.getLogger(__name__)
 
 # Silero processes 512-sample windows; anything shorter cannot be evaluated.
 _MIN_VAD_SAMPLES = 512
@@ -886,7 +1010,7 @@ def transcribe(audio: np.ndarray) -> str:
 
 
 def gate_loop(
-    ring,
+    ring: AudioRing,
     src: str,
     transcript: Transcript,
     stop_event: threading.Event,
@@ -894,35 +1018,50 @@ def gate_loop(
     """Watch one ring, transcribe each utterance as its trailing silence lands."""
     pending = np.zeros(0, dtype=np.float32)
     cursor = 0
+    errors = 0
 
     while not stop_event.is_set():
-        new, start = ring.read_from(cursor)
-        if start > cursor:
-            # We fell behind and audio was dropped. The partial utterance in
-            # hand is no longer contiguous with what arrived, so discard it
-            # rather than splice a gap into the middle of a sentence.
+        try:
+            new, start = ring.read_from(cursor)
+            if start > cursor:
+                # We fell behind and audio was dropped. The partial utterance
+                # in hand is no longer contiguous with what arrived, so
+                # discard it rather than splice a gap into a sentence.
+                pending = np.zeros(0, dtype=np.float32)
+            cursor = start + len(new)
+            if len(new):
+                pending = np.concatenate((pending, new))
+
+            spans = speech_spans(pending)
+            if not spans:
+                # Keep a short tail so a word starting right now is not
+                # clipped. `cursor` tracks the ring, not `pending`, so
+                # trimming here is safe.
+                if len(pending) > _SILENCE_SAMPLES:
+                    pending = pending[-_SILENCE_SAMPLES:]
+            else:
+                last_end = spans[-1]["end"]
+                trailing = len(pending) - last_end
+                if trailing >= _SILENCE_SAMPLES or len(pending) >= _MAX_UTTERANCE_SAMPLES:
+                    speech = pending[spans[0]["start"]:last_end]
+                    pending = pending[last_end:]
+                    text = transcribe(speech)
+                    if text:
+                        transcript.append(Turn(src=src, text=text, ts=time.time()))
+        except Exception:
+            # This runs on a daemon thread, and both calls above reach native
+            # libraries (ONNX for the VAD, CTranslate2 for the decode) that
+            # can throw under CPU pressure or on a malformed frame. An
+            # uncaught exception kills the thread, and that source's
+            # transcription is then silently dead for the rest of the
+            # session — indistinguishable from nobody talking. Same reasoning
+            # as the capture callback: stay alive, drop the buffer that
+            # failed so a poison frame cannot spin the loop, and log the
+            # first failure plus every hundredth.
+            errors += 1
+            if errors == 1 or errors % 100 == 0:
+                log.exception("gate loop failed on %s (%d errors)", src, errors)
             pending = np.zeros(0, dtype=np.float32)
-        cursor = start + len(new)
-        if len(new):
-            pending = np.concatenate((pending, new))
-
-        spans = speech_spans(pending)
-        if not spans:
-            # Keep a short tail so a word starting right now is not clipped.
-            # `cursor` tracks the ring, not `pending`, so trimming here is safe.
-            if len(pending) > _SILENCE_SAMPLES:
-                pending = pending[-_SILENCE_SAMPLES:]
-            stop_event.wait(0.2)
-            continue
-
-        last_end = spans[-1]["end"]
-        trailing_silence = len(pending) - last_end
-        if trailing_silence >= _SILENCE_SAMPLES or len(pending) >= _MAX_UTTERANCE_SAMPLES:
-            speech = pending[spans[0]["start"]:last_end]
-            pending = pending[last_end:]
-            text = transcribe(speech)
-            if text:
-                transcript.append(Turn(src=src, text=text, ts=time.time()))
 
         stop_event.wait(0.2)
 ```
