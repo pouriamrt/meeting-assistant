@@ -134,9 +134,17 @@ and Silero both require exactly 16 kHz mono. Nothing else converts between them.
 
 ## Model and request shape
 
-Claude Opus 5 with fast mode. Cost lands near $0.50 for a 45-minute conversation
-against SMOG's quota wall, so the model was chosen on latency and answer quality
-rather than price.
+Claude Opus 5. Cost lands near $0.50 for a 45-minute conversation against SMOG's
+quota wall, so the model was chosen on latency and answer quality rather than
+price.
+
+Fast mode was the original choice and is **off by default**, behind
+`config.FAST_MODE`. It is a research preview requiring the organisation to be
+allowlisted, and without that entitlement every request fails with `rate limit of
+0 fast mode input tokens per minute` — the app does not run slower, it does not
+run at all. Measured on this account, which has no entitlement. Turn it on if
+access is granted: up to 2.5x output tokens/sec is the difference between reading
+a cue card mid-sentence and after it.
 
 ```python
 with client.beta.messages.stream(

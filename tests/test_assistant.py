@@ -412,13 +412,30 @@ def test_request_omits_the_parameters_that_400_on_opus_5():
         assert banned not in req
 
 
-def test_request_pins_fast_mode_and_effort():
+def test_request_pins_the_model_and_effort():
     req = answer.build_request("t", "tail")
     assert req["model"] == "claude-opus-5"
-    assert req["speed"] == "fast"
-    assert req["betas"] == ["fast-mode-2026-02-01"]
     assert req["output_config"] == {"effort": "low"}
     assert req["max_tokens"] == 2000
+
+
+def test_fast_mode_is_off_by_default_and_absent_from_the_request(monkeypatch):
+    # Measured against the live API: without the org entitlement every request
+    # 429s with "rate limit of 0 fast mode input tokens per minute", so the app
+    # is unusable rather than merely slower. Off unless explicitly enabled.
+    monkeypatch.setattr(config, "FAST_MODE", False)
+    req = answer.build_request("t", "tail")
+    assert "speed" not in req
+    assert "betas" not in req
+
+
+def test_fast_mode_when_enabled_sends_the_speed_and_the_beta_together(monkeypatch):
+    # Both are required together: speed="fast" without the beta flag errors,
+    # and the flag alone does nothing.
+    monkeypatch.setattr(config, "FAST_MODE", True)
+    req = answer.build_request("t", "tail")
+    assert req["speed"] == "fast"
+    assert req["betas"] == ["fast-mode-2026-02-01"]
 
 
 def test_query_tail_embeds_the_typed_question():

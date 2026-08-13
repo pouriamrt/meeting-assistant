@@ -22,6 +22,14 @@ MAX_TURNS = 400
 # False to debug the overlay — with exclusion on you cannot screenshot it.
 EXCLUDE_FROM_CAPTURE = True
 
+# Fast mode is a research preview and needs the org to be allowlisted for it.
+# Without that entitlement EVERY request 429s with "rate limit of 0 fast mode
+# input tokens per minute" - the app is unusable rather than merely slower, so
+# this defaults off. Turn it on if you get access: it buys up to 2.5x output
+# tokens/sec, which is the difference between reading a cue card mid-sentence
+# and after it.
+FAST_MODE = False
+
 
 def api_key() -> str:
     """Read the key at call time so it never lives in module state."""

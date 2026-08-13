@@ -5,7 +5,7 @@ from typing import Protocol
 
 import anthropic
 
-from . import prompts
+from . import config, prompts
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +38,9 @@ def build_request(transcript_text: str, tail: str) -> dict:
     max_tokens covers thinking plus text together, so it is sized well above
     the four bullets the prompt asks for.
     """
-    return {
+    req: dict = {
         "model": "claude-opus-5",
         "max_tokens": 2000,
-        "speed": "fast",
-        "betas": ["fast-mode-2026-02-01"],
         "output_config": {"effort": "low"},
         "system": [
             {"type": "text", "text": prompts.SYSTEM, "cache_control": _CACHE}
@@ -57,6 +55,10 @@ def build_request(transcript_text: str, tail: str) -> dict:
             }
         ],
     }
+    if config.FAST_MODE:
+        req["speed"] = "fast"
+        req["betas"] = ["fast-mode-2026-02-01"]
+    return req
 
 
 def stream_answer(

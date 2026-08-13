@@ -43,6 +43,9 @@ Everything adjustable is in `assistant/config.py`.
 - Cutting you off mid-sentence: raise `SILENCE_END_MS`
 - Debugging the overlay: `EXCLUDE_FROM_CAPTURE = False`, because you cannot
   screenshot the overlay while exclusion is on
+- Got fast-mode access: `FAST_MODE = True`. It is off by default because
+  without the entitlement every request fails with `rate limit of 0 fast mode
+  input tokens per minute` — unusable, not just slower
 
 ## What it does not hide
 
