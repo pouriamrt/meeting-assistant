@@ -1,9 +1,12 @@
+import time
+
 import pytest
 import numpy as np
 
 from assistant import config
 from assistant.audio_ring import AudioRing
 from assistant.capture import to_mono_16k
+from assistant.transcribe import Transcript, Turn, speech_spans
 
 
 def test_api_key_missing_raises_loudly(monkeypatch):
@@ -142,3 +145,51 @@ def test_to_mono_16k_raises_on_a_truncated_packet():
     # capture would die mid-meeting with an empty transcript as the only sign.
     with pytest.raises(ValueError):
         to_mono_16k(b"\x00\x00\x00", channels=1, src_rate=16_000)
+
+
+def test_silent_start_empty_buffer_is_silence():
+    # The WASAPI trap: an idle endpoint delivers nothing at all. The gate must
+    # treat that as ordinary silence — no exception, no special case.
+    assert speech_spans(np.zeros(0, dtype=np.float32)) == []
+
+
+def test_silent_start_digital_silence_is_silence():
+    assert speech_spans(np.zeros(config.SAMPLE_RATE * 2, dtype=np.float32)) == []
+
+
+def test_sub_window_buffer_is_silence_not_an_error():
+    # Silero needs 512 samples. Anything shorter must not reach it.
+    assert speech_spans(np.zeros(100, dtype=np.float32)) == []
+
+
+def test_transcript_renders_with_source_tags():
+    t = Transcript(max_turns=10)
+    t.append(Turn(src="them", text="what's your postgres experience", ts=1.0))
+    t.append(Turn(src="me", text="about four years", ts=2.0))
+    assert t.render() == (
+        "[them] what's your postgres experience\n[me] about four years"
+    )
+
+
+def test_transcript_render_carries_no_timestamps():
+    # Rendering a timestamp would rewrite frozen bytes on every press and
+    # silently invalidate the whole cached prefix.
+    now = time.time()
+    t = Transcript(max_turns=10)
+    t.append(Turn(src="them", text="hello", ts=now))
+    assert t.render() == "[them] hello"
+    assert str(int(now)) not in t.render()
+
+
+def test_transcript_drops_oldest_past_the_cap():
+    t = Transcript(max_turns=2)
+    for i in range(4):
+        t.append(Turn(src="me", text=f"turn{i}", ts=float(i)))
+    assert t.render() == "[me] turn2\n[me] turn3"
+    assert len(t) == 2
+
+
+def test_turn_is_frozen():
+    turn = Turn(src="me", text="hello", ts=1.0)
+    with pytest.raises(Exception):
+        turn.text = "changed"
