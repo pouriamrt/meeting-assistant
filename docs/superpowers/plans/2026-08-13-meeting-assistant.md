@@ -1521,7 +1521,18 @@ class Overlay:
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
         self.root.attributes("-alpha", 0.0)
-        self.root.after(0, self._apply_exclusion_then_show)
+        # Called directly, NOT scheduled via root.after(0, ...): a raise
+        # inside an `after` callback is caught by Tk's own callback wrapper
+        # and handed to report_callback_exception, which by default just
+        # prints to stderr. It never reaches whoever called run(). That would
+        # swallow the one exception this code exists to surface, leaving the
+        # overlay destroyed-but-not-raised instead of visibly refusing to
+        # start — a security guarantee that depends on an exception nobody
+        # receives is not a guarantee. Running it here, on the plain Python
+        # call stack before mainloop starts, lets the raise propagate out of
+        # __init__ normally. update_idletasks() maps the window and yields a
+        # usable HWND without the mainloop running.
+        self._apply_exclusion_then_show()
         self.root.after(50, self._drain)
 
     def _apply_exclusion_then_show(self) -> None:
@@ -1626,7 +1637,7 @@ Confirm a failed exclusion refuses to show rather than coming up unprotected:
 ```bash
 uv run python -c "
 import queue, assistant.overlay as ov
-ov.WDA_EXCLUDEFROMCAPTURE = 0x00000099   # invalid flag, forces the call to fail
+ov.WDA_EXCLUDEFROMCAPTURE = 0x00000002   # rejected flag, forces the call to fail
 try:
     ov.Overlay(queue.Queue()).run()
     print('FAIL: overlay showed anyway')
@@ -1636,6 +1647,13 @@ except RuntimeError as e:
 ```
 
 Expected: `PASS: Screen-capture exclusion failed; ...` and no window appears.
+
+The injected flag is build-dependent. `0x99` was the obvious choice and is wrong:
+measured on Windows 11 build 26200, `SetWindowDisplayAffinity` *accepts* it, so the
+test reports a failure of the guard when it is really a failure of its own premise.
+`0x2` is rejected on that build. If this step ever reports `FAIL`, probe first —
+call `SetWindowDisplayAffinity` directly with the flag and check that it actually
+returns 0 — before concluding the overlay is broken.
 
 - [ ] **Step 5: Commit**
 
