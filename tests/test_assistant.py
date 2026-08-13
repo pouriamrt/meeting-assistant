@@ -1,6 +1,8 @@
 import pytest
+import numpy as np
 
 from assistant import config
+from assistant.audio_ring import AudioRing
 
 
 def test_api_key_missing_raises_loudly(monkeypatch):
@@ -22,3 +24,54 @@ def test_api_key_is_not_module_state(monkeypatch):
     assert not any(
         isinstance(v, str) and "sk-ant" in v for v in vars(config).values()
     )
+
+
+def test_ring_returns_everything_below_cap():
+    ring = AudioRing(max_samples=10)
+    ring.write(np.arange(4, dtype=np.float32))
+    samples, start = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(4, dtype=np.float32))
+    assert start == 0
+    assert ring.total_written == 4
+
+
+def test_ring_keeps_exact_tail_across_the_wrap():
+    # Writes straddle the cap: 6 then 8 samples into a 10-sample ring.
+    # The retained window must be the true last 10 samples, with no sample
+    # dropped from the middle and none duplicated at the seam.
+    ring = AudioRing(max_samples=10)
+    ring.write(np.arange(0, 6, dtype=np.float32))
+    ring.write(np.arange(6, 14, dtype=np.float32))
+
+    samples, start = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(4, 14, dtype=np.float32))
+    assert start == 4
+    assert ring.total_written == 14
+    assert len(samples) == 10
+
+
+def test_ring_read_from_cursor_returns_only_new_samples():
+    ring = AudioRing(max_samples=100)
+    ring.write(np.arange(0, 5, dtype=np.float32))
+    ring.write(np.arange(5, 9, dtype=np.float32))
+    samples, start = ring.read_from(5)
+    assert np.array_equal(samples, np.arange(5, 9, dtype=np.float32))
+    assert start == 5
+
+
+def test_ring_reports_the_gap_when_the_reader_fell_behind():
+    # A stalled consumer must be able to detect that audio was dropped,
+    # rather than silently splicing two non-adjacent spans together.
+    ring = AudioRing(max_samples=10)
+    ring.write(np.arange(0, 20, dtype=np.float32))
+    samples, start = ring.read_from(0)
+    assert start == 10, "reader asked for sample 0, oldest surviving is 10"
+    assert np.array_equal(samples, np.arange(10, 20, dtype=np.float32))
+
+
+def test_ring_read_past_the_end_is_empty_not_an_error():
+    ring = AudioRing(max_samples=10)
+    ring.write(np.arange(3, dtype=np.float32))
+    samples, start = ring.read_from(3)
+    assert len(samples) == 0
+    assert start == 3
