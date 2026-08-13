@@ -15,6 +15,7 @@ WHISPER_MODEL = "base.en"   # distil-small.en if accuracy hurts more than latenc
 WHISPER_THREADS = 4         # 15W part sharing the CPU with a live video call
 
 SILENCE_END_MS = 700        # trailing silence that closes an utterance
+GATE_POLL_S = 0.1           # how often the gate checks for new audio
 MAX_UTTERANCE_S = 30        # force a transcribe on an unbroken monologue
 
 MAX_TURNS = 400

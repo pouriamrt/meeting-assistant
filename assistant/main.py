@@ -11,7 +11,7 @@ import anthropic
 from . import answer, config, prompts
 from .capture import Capture
 from .overlay import Overlay
-from .transcribe import Transcript, gate_loop
+from .transcribe import Transcript, gate_loop, warm_model
 
 if TYPE_CHECKING:  # pynput touches the platform input stack on import
     from pynput import keyboard
@@ -169,6 +169,10 @@ def main() -> None:
     ui_queue: queue.Queue = queue.Queue()
     stop = threading.Event()
     answer_gate = _AnswerGate()
+
+    # Off the critical path: the first decode would otherwise pay ~1s of
+    # model construction on top of its own latency.
+    threading.Thread(target=warm_model, daemon=True, name="warm").start()
 
     capture = Capture()
     capture.start()

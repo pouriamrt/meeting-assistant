@@ -70,6 +70,10 @@ class Overlay:
         self.text.pack(fill="both", expand=True)
         self.text.configure(state="disabled")
 
+        self._drag_from: tuple[int, int] | None = None
+        self._make_draggable(self.text)
+        self._make_draggable(self.root)
+
         self._visible = True
         self._alive = True  # cleared on quit, so the drain stops rescheduling
         self._entry: tk.Entry | None = None  # inline query input, see _open_query_entry
@@ -103,6 +107,34 @@ class Overlay:
                     "overlay unprotected. Needs Windows 10 build 19041+."
                 ) from exc
         self.root.attributes("-alpha", 1.0)
+
+    def _make_draggable(self, widget: tk.Misc) -> None:
+        """Drag the window by its body.
+
+        overrideredirect(True) removes the titlebar, so there is nothing to
+        grab and no window manager to do the moving - both have to be
+        hand-rolled. Moving does not touch the HWND, so capture exclusion
+        survives being dragged.
+        """
+
+        def grab(event: "tk.Event") -> None:
+            self._drag_from = (
+                event.x_root - self.root.winfo_x(),
+                event.y_root - self.root.winfo_y(),
+            )
+
+        def drag(event: "tk.Event") -> None:
+            if self._drag_from is None:
+                return
+            dx, dy = self._drag_from
+            self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+
+        def drop(_event: "tk.Event") -> None:
+            self._drag_from = None
+
+        widget.bind("<Button-1>", grab)
+        widget.bind("<B1-Motion>", drag)
+        widget.bind("<ButtonRelease-1>", drop)
 
     def _write(self, chunk: str) -> None:
         self.text.configure(state="normal")

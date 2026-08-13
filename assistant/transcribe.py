@@ -34,9 +34,10 @@ _GATE_OPTS = VadOptions(
 _SILENCE_SAMPLES = config.SAMPLE_RATE * config.SILENCE_END_MS // 1000
 _MAX_UTTERANCE_SAMPLES = config.SAMPLE_RATE * config.MAX_UTTERANCE_S
 
-# Ticks (at the 0.2s wait below) of a completely unchanged ring before the
-# stall warning fires - ~30s of no packets at all.
-_STALL_TICKS = 150
+# Ticks of a completely unchanged ring before the stall warning fires.
+# Derived from the poll interval rather than hardcoded, so changing the poll
+# rate cannot silently retune this to 15s or 60s.
+_STALL_TICKS = int(30 / config.GATE_POLL_S)
 
 _model: WhisperModel | None = None
 _model_lock = threading.Lock()
@@ -104,6 +105,16 @@ def _is_degenerate(text: str) -> bool:
     """
     parts = [p for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p]
     return len(parts) >= 4 and len(set(parts)) == 1
+
+
+def warm_model() -> None:
+    """Load whisper now rather than on the first utterance.
+
+    Construction costs about a second on this machine, and lazily it lands on
+    the first question of the meeting - the one moment latency is least
+    affordable.
+    """
+    _get_model()
 
 
 def transcribe(audio: np.ndarray) -> str:
@@ -210,4 +221,4 @@ def gate_loop(
                 "%s capture has delivered nothing for 30s - device gone?", src
             )
 
-        stop_event.wait(0.2)
+        stop_event.wait(config.GATE_POLL_S)

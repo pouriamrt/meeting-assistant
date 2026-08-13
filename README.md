@@ -32,6 +32,7 @@ Missing `ANTHROPIC_API_KEY` will fail immediately on startup with a clear error.
 | `Ctrl+Space` | Answer the last question they asked |
 | `Ctrl+Shift+Space` | Answer a typed question, using the transcript |
 | `Ctrl+Alt+H` | Hide or show the overlay |
+| drag the box | Move it — there is no titlebar to grab |
 | `Ctrl+Alt+Q` | Quit |
 
 ## Tuning
@@ -40,7 +41,9 @@ Everything adjustable is in `assistant/config.py`.
 
 - Transcription too inaccurate: `WHISPER_MODEL = "distil-small.en"`
 - Machine bogged down: lower `WHISPER_THREADS`
-- Cutting you off mid-sentence: raise `SILENCE_END_MS`
+- Cutting you off mid-sentence: raise `SILENCE_END_MS` (700ms today; a
+  natural pause mid-question otherwise splits it into two turns)
+- Want lower latency at some CPU cost: lower `GATE_POLL_S`
 - Debugging the overlay: `EXCLUDE_FROM_CAPTURE = False`, because you cannot
   screenshot the overlay while exclusion is on
 - Got fast-mode access: `FAST_MODE = True`. It is off by default because

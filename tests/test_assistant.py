@@ -770,3 +770,54 @@ def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
         assert entry.winfo_toplevel() is ov.root
     finally:
         ov.root.destroy()
+
+
+def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
+    # overrideredirect(True) means no titlebar and no window manager to move
+    # the window, so dragging is hand-rolled. It must move by the drag delta -
+    # not jump so the grab point lands under the cursor - and it must do so
+    # without recreating the toplevel: display affinity lives on the HWND, so
+    # a new HWND would silently drop capture exclusion mid-drag.
+    import queue as _queue
+    import tkinter as _tk
+
+    from assistant import config as _config
+
+    monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
+    from assistant.overlay import Overlay
+
+    try:
+        ov = Overlay(_queue.Queue())
+    except _tk.TclError as exc:
+        pytest.skip(f"tk unavailable: {exc}")
+
+    try:
+        ov.root.attributes("-alpha", 0.0)
+        ov.root.geometry("+100+100")
+        ov.root.update()
+        hwnd_before = ov.root.winfo_id()
+
+        # Drive the real handlers rather than setting geometry ourselves -
+        # otherwise this passes with no drag code at all.
+        ov.text.event_generate("<Button-1>", rootx=150, rooty=150)
+        ov.root.update()
+        assert ov._drag_from == (50, 50), "grab did not record the offset"
+
+        ov.text.event_generate("<B1-Motion>", rootx=210, rooty=190)
+        ov.root.update()
+
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140), (
+            f"moved to {ov.root.winfo_x()},{ov.root.winfo_y()} - expected 160,140"
+        )
+        assert ov.root.winfo_id() == hwnd_before, "HWND changed - exclusion would drop"
+
+        ov.text.event_generate("<ButtonRelease-1>", rootx=210, rooty=190)
+        ov.root.update()
+        assert ov._drag_from is None, "release did not clear the drag state"
+
+        # A motion event with no grab must not move anything.
+        ov.text.event_generate("<B1-Motion>", rootx=400, rooty=400)
+        ov.root.update()
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140)
+    finally:
+        ov.root.destroy()
