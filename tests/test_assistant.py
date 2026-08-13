@@ -134,3 +134,11 @@ def test_to_mono_16k_handles_an_empty_packet():
     out = to_mono_16k(b"", channels=2, src_rate=48_000)
     assert len(out) == 0
     assert out.dtype == np.float32
+
+
+def test_to_mono_16k_raises_on_a_truncated_packet():
+    # Documents why the stream callback guards. A partial frame is possible,
+    # and an unguarded raise on the WASAPI thread tears the stream down —
+    # capture would die mid-meeting with an empty transcript as the only sign.
+    with pytest.raises(ValueError):
+        to_mono_16k(b"\x00\x00\x00", channels=1, src_rate=16_000)
