@@ -2023,3 +2023,60 @@ last.
 **`WHISPER_THREADS = 4` is a guess.** It is a 15 W part with two performance
 cores, sharing the CPU with a live video call. If the call itself starts
 stuttering, drop it to 2 before touching anything else.
+
+---
+
+## Post-review corrections
+
+The final whole-branch review found twelve issues that per-task review could not
+see. All were applied in commit `c522099`. The code is the authority on the
+details; this section records what changed and why, because the reasoning is not
+recoverable from a diff.
+
+**The query dialog was not capture-excluded (Critical).** `simpledialog.askstring`
+creates its own `Toplevel`, and `SetWindowDisplayAffinity` is per-HWND and is not
+inherited by owned or transient windows. So `Ctrl+Shift+Space` — one of the two
+documented answer hotkeys — opened an unprotected window displaying the question
+being typed, which is usually the most sensitive string in the session. It failed
+silently, and the manual verification step only ever dragged a selection over the
+overlay region, so it would never have caught it. Replaced with an inline
+`tk.Entry` inside the already-excluded root: one window, one HWND, already
+protected.
+
+**The transcript cache breakpoint was a 2× cost regression.** Prompt caching is a
+prefix match at block boundaries. The transcript grows between every press, so
+that block never matches — it was written fresh each press and read essentially
+never, at the 1-hour TTL's 2× write premium, on the largest and fastest-growing
+block in the prompt. Removing the breakpoint bills it at 1×. Worse, the
+diagnostic could not detect this: the system breakpoint genuinely does hit, so
+`cache_read` reads non-zero while the transcript misses every time. With one
+breakpoint left, "zero cache reads means an invalidator got in" is a true signal
+again.
+
+**`SYSTEM` sat about four tokens above the 512-token minimum cacheable prefix**,
+and `config.NAME` is substituted into it at two sites — so a user following the
+README and setting a short `ASSISTANT_NAME` would drop it below the threshold and
+silently lose caching entirely. Padded with a worked cue-card example, which buys
+margin and is the single most useful thing to add to a prompt like this. The exact
+count still needs confirming with `count_tokens` against a live key.
+
+**`Capture.stop()` was unguarded**, so it masked the actionable "no default input
+device" message on the path a first-time user is most likely to hit, and could
+wedge retry by leaving `_streams` unclear forever. Both loops now guarded.
+
+**A capture stream that stops delivering was undetectable.** The four guards added
+during the build all defend against a callback dying from an *exception*; WASAPI
+going quiet — an unplugged headset, a switched default device — produces the same
+silent death with no exception at all. A stall counter in `gate_loop` now warns
+once after ~30 seconds of no packets, reusing `total_written`, which until then
+existed only for tests.
+
+**Three tests were strengthened.** One more instance of a test satisfied by the
+broken state (the ring's empty-deque guard, whose real failure mode — a
+never-written ring, which `gate_loop` hits on its first tick — had no test at
+all), a canary pinning that the API key never reaches the log or the UI, and
+coverage of the stall detection.
+
+The remaining corrections were small: an explicit `sampling_rate`, a comment that
+overstated what the VAD guard protects against, a stale docstring, a guard on the
+answer thread's body, and moving the drain's tuple unpack inside its own guard.
