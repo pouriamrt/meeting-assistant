@@ -1,5 +1,6 @@
 """VAD-gated local transcription into a tagged in-memory transcript."""
 
+import logging
 import threading
 import time
 from collections import deque
@@ -10,6 +11,9 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 from . import config
+from .audio_ring import AudioRing
+
+log = logging.getLogger(__name__)
 
 # Silero processes 512-sample windows; anything shorter cannot be evaluated.
 _MIN_VAD_SAMPLES = 512
@@ -95,7 +99,7 @@ def transcribe(audio: np.ndarray) -> str:
 
 
 def gate_loop(
-    ring,
+    ring: AudioRing,
     src: str,
     transcript: Transcript,
     stop_event: threading.Event,
@@ -103,34 +107,49 @@ def gate_loop(
     """Watch one ring, transcribe each utterance as its trailing silence lands."""
     pending = np.zeros(0, dtype=np.float32)
     cursor = 0
+    errors = 0
 
     while not stop_event.is_set():
-        new, start = ring.read_from(cursor)
-        if start > cursor:
-            # We fell behind and audio was dropped. The partial utterance in
-            # hand is no longer contiguous with what arrived, so discard it
-            # rather than splice a gap into the middle of a sentence.
+        try:
+            new, start = ring.read_from(cursor)
+            if start > cursor:
+                # We fell behind and audio was dropped. The partial utterance
+                # in hand is no longer contiguous with what arrived, so
+                # discard it rather than splice a gap into a sentence.
+                pending = np.zeros(0, dtype=np.float32)
+            cursor = start + len(new)
+            if len(new):
+                pending = np.concatenate((pending, new))
+
+            spans = speech_spans(pending)
+            if not spans:
+                # Keep a short tail so a word starting right now is not
+                # clipped. `cursor` tracks the ring, not `pending`, so
+                # trimming here is safe.
+                if len(pending) > _SILENCE_SAMPLES:
+                    pending = pending[-_SILENCE_SAMPLES:]
+            else:
+                last_end = spans[-1]["end"]
+                trailing = len(pending) - last_end
+                if trailing >= _SILENCE_SAMPLES or len(pending) >= _MAX_UTTERANCE_SAMPLES:
+                    speech = pending[spans[0]["start"]:last_end]
+                    pending = pending[last_end:]
+                    text = transcribe(speech)
+                    if text:
+                        transcript.append(Turn(src=src, text=text, ts=time.time()))
+        except Exception:
+            # This runs on a daemon thread, and both calls above reach native
+            # libraries (ONNX for the VAD, CTranslate2 for the decode) that
+            # can throw under CPU pressure or on a malformed frame. An
+            # uncaught exception kills the thread, and that source's
+            # transcription is then silently dead for the rest of the
+            # session — indistinguishable from nobody talking. Same reasoning
+            # as the capture callback: stay alive, drop the buffer that
+            # failed so a poison frame cannot spin the loop, and log the
+            # first failure plus every hundredth.
+            errors += 1
+            if errors == 1 or errors % 100 == 0:
+                log.exception("gate loop failed on %s (%d errors)", src, errors)
             pending = np.zeros(0, dtype=np.float32)
-        cursor = start + len(new)
-        if len(new):
-            pending = np.concatenate((pending, new))
-
-        spans = speech_spans(pending)
-        if not spans:
-            # Keep a short tail so a word starting right now is not clipped.
-            # `cursor` tracks the ring, not `pending`, so trimming here is safe.
-            if len(pending) > _SILENCE_SAMPLES:
-                pending = pending[-_SILENCE_SAMPLES:]
-            stop_event.wait(0.2)
-            continue
-
-        last_end = spans[-1]["end"]
-        trailing_silence = len(pending) - last_end
-        if trailing_silence >= _SILENCE_SAMPLES or len(pending) >= _MAX_UTTERANCE_SAMPLES:
-            speech = pending[spans[0]["start"]:last_end]
-            pending = pending[last_end:]
-            text = transcribe(speech)
-            if text:
-                transcript.append(Turn(src=src, text=text, ts=time.time()))
 
         stop_event.wait(0.2)
