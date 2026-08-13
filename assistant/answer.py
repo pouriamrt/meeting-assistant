@@ -1,11 +1,25 @@
 """Request assembly and token streaming."""
 
 import logging
-import queue
+from typing import Protocol
+
+import anthropic
 
 from . import prompts
 
 log = logging.getLogger(__name__)
+
+
+class Emitter(Protocol):
+    """Anything this can stream tokens into.
+
+    Narrower than `queue.Queue` on purpose: main.py wraps the real queue in a
+    generation-scoped view that drops superseded answers, and that view is not
+    a Queue. Naming the one method actually used lets the wrapper be passed
+    honestly instead of cast to a type it is not.
+    """
+
+    def put(self, item: tuple) -> None: ...
 
 _CACHE = {"type": "ephemeral", "ttl": "1h"}
 
@@ -46,10 +60,10 @@ def build_request(transcript_text: str, tail: str) -> dict:
 
 
 def stream_answer(
-    client,
+    client: "anthropic.Anthropic",
     transcript_text: str,
     tail: str,
-    ui_queue: "queue.Queue",
+    ui_queue: Emitter,
 ) -> None:
     """Stream one answer onto the UI queue. Runs on its own thread per press."""
     ui_queue.put(("clear", None))

@@ -90,7 +90,12 @@ class Capture:
         name = device["name"]
         errors = 0
 
-        def callback(in_data, frame_count, time_info, status) -> tuple[None, int]:
+        def callback(
+            in_data: bytes,
+            frame_count: int,
+            time_info: dict,
+            status: int,
+        ) -> tuple[None, int]:
             # Must return fast: this is the WASAPI thread, and stalling it
             # causes audible dropouts in the call itself.
             #

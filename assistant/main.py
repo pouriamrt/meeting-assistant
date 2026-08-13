@@ -4,7 +4,7 @@ import logging
 import queue
 import threading
 from collections.abc import Callable
-from typing import cast
+from typing import TYPE_CHECKING
 
 import anthropic
 
@@ -12,6 +12,9 @@ from . import answer, config, prompts
 from .capture import Capture
 from .overlay import Overlay
 from .transcribe import Transcript, gate_loop
+
+if TYPE_CHECKING:  # pynput touches the platform input stack on import
+    from pynput import keyboard
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +92,73 @@ def _guarded(label: str, fn: Callable[[], None]) -> Callable[[], None]:
     return wrapped
 
 
+def _install_hotkeys(
+    client: "anthropic.Anthropic",
+    transcript: Transcript,
+    ui_queue: "queue.Queue",
+    answer_gate: _AnswerGate,
+) -> "keyboard.GlobalHotKeys":
+    """Build the four hotkey callbacks and start the listener.
+
+    Split out of main() for length. The callbacks all close over the same four
+    objects, which is why those arrive as parameters rather than through
+    module state.
+    """
+
+    def start_answer(tail: str) -> None:
+        gen_queue = answer_gate.start(ui_queue)
+
+        def run() -> None:
+            # stream_answer guards its own streaming call, but not the
+            # ui_queue.put("clear") or usage-logging around it - same
+            # dies-silently shape as _guarded, so it gets the same wrap.
+            try:
+                answer.stream_answer(client, transcript.render(), tail, gen_queue)
+            except Exception:
+                log.exception("answer thread failed")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_last_question() -> None:
+        if len(transcript) == 0:
+            # Routed through the gate too: this also counts as "a press", and
+            # must supersede whatever a previous press is still streaming
+            # rather than write over it directly.
+            answer_gate.start(ui_queue).put(("status", "nothing transcribed yet"))
+            return
+        start_answer(prompts.last_question_tail())
+
+    def on_query() -> None:
+        # This fires on pynput's thread, which must never touch a widget. Hand
+        # the query entry to the main thread over the queue, like everything
+        # else, and get the typed string back through this callback.
+        def on_typed(typed: str) -> None:
+            start_answer(prompts.query_tail(typed))
+
+        ui_queue.put(("prompt", on_typed))
+
+    def on_toggle() -> None:
+        ui_queue.put(("toggle", None))
+
+    def on_quit() -> None:
+        ui_queue.put(("quit", None))
+
+    # Imported here rather than at module scope: pynput touches the platform
+    # input stack on import, and nothing else in this package needs it.
+    from pynput import keyboard as kb
+
+    hotkeys = kb.GlobalHotKeys(
+        {
+            "<ctrl>+<space>": _guarded("last_question", on_last_question),
+            "<ctrl>+<shift>+<space>": _guarded("query", on_query),
+            "<ctrl>+<alt>+h": _guarded("toggle", on_toggle),
+            "<ctrl>+<alt>+q": _guarded("quit", on_quit),
+        }
+    )
+    hotkeys.start()
+    return hotkeys
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -121,58 +191,7 @@ def main() -> None:
         # open audio device.
         overlay = Overlay(ui_queue)
 
-        def start_answer(tail: str) -> None:
-            gen_queue = answer_gate.start(ui_queue)
-
-            def run() -> None:
-                # stream_answer guards its own streaming call, but not the
-                # ui_queue.put("clear") or usage-logging around it - same
-                # dies-silently shape as _guarded, so it gets the same wrap.
-                try:
-                    answer.stream_answer(
-                        client, transcript.render(), tail, cast(queue.Queue, gen_queue)
-                    )
-                except Exception:
-                    log.exception("answer thread failed")
-
-            threading.Thread(target=run, daemon=True).start()
-
-        def on_last_question() -> None:
-            if len(transcript) == 0:
-                # Routed through the gate too: this also counts as "a press",
-                # and must supersede whatever a previous press is still
-                # streaming rather than write over it directly.
-                answer_gate.start(ui_queue).put(("status", "nothing transcribed yet"))
-                return
-            start_answer(prompts.last_question_tail())
-
-        def on_query() -> None:
-            # This fires on pynput's thread, which must never touch a widget.
-            # Hand the query entry to the main thread over the queue, like
-            # everything else, and get the typed string back through this
-            # callback.
-            def on_typed(typed: str) -> None:
-                start_answer(prompts.query_tail(typed))
-
-            ui_queue.put(("prompt", on_typed))
-
-        def on_toggle() -> None:
-            ui_queue.put(("toggle", None))
-
-        def on_quit() -> None:
-            ui_queue.put(("quit", None))
-
-        from pynput import keyboard
-
-        hotkeys = keyboard.GlobalHotKeys(
-            {
-                "<ctrl>+<space>": _guarded("last_question", on_last_question),
-                "<ctrl>+<shift>+<space>": _guarded("query", on_query),
-                "<ctrl>+<alt>+h": _guarded("toggle", on_toggle),
-                "<ctrl>+<alt>+q": _guarded("quit", on_quit),
-            }
-        )
-        hotkeys.start()
+        hotkeys = _install_hotkeys(client, transcript, ui_queue, answer_gate)
 
         log.info(
             "ready - ctrl+space answer, ctrl+shift+space query, "

@@ -1,7 +1,8 @@
 # Local meeting assistant — design
 
 Date: 2026-08-13
-Status: approved, not yet implemented
+Status: implemented on `feat/meeting-assistant`; amended where review proved
+the design wrong (see Caching, Testing, and the note in Prompts)
 
 ## What this is
 
@@ -58,7 +59,9 @@ THREAD stt        silero VAD gate ─► speech? ─► faster-whisper int8
 
 HOTKEY LISTENER (pynput, own thread)
   Ctrl+Space ───────► answer thread, mode="last_question"
-  Ctrl+Shift+Space ─► input box ─► answer thread, mode="query"
+  Ctrl+Shift+Space ─► inline entry ─► answer thread, mode="query"
+  Ctrl+Alt+H ───────► hide / show
+  Ctrl+Alt+Q ───────► quit
 
 THREAD answer (transient, one per press)
   build prompt ─► client.beta.messages.stream(...) ─► ui_queue.put(token)
@@ -114,7 +117,8 @@ becomes a goal.
 | `answer.py` | prompt assembly, cache breakpoints, streaming | `anthropic`, `prompts` |
 | `overlay.py` | always-on-top window, token painting, capture exclusion | `tkinter` |
 | `main.py` | wiring, hotkeys, queues | all |
-| `test_assistant.py` | silent-start path, buffer trim boundary | `pytest` |
+| `audio_ring.py` | drop-oldest sample ring, absolute indexing | — |
+| `test_assistant.py` | 49 tests; see Testing | `pytest` |
 
 The transcript is one in-memory list of `Turn(src, text, ts)`, capped. `src` is
 `"them"` for loopback and `"me"` for mic. That tag is what makes "answer the last
@@ -144,8 +148,7 @@ with client.beta.messages.stream(
     system=[{"type": "text", "text": SYSTEM,
              "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
     messages=[{"role": "user", "content": [
-        {"type": "text", "text": transcript_text,
-         "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": transcript_text},
         {"type": "text", "text": tail},
     ]}],
 ) as stream:
@@ -181,12 +184,13 @@ back long, tighten that line and leave effort alone.
 
 ```
 ┌─ system ────────────────────────────────────────┐
-│  role + answer format          ~200 tok         │  frozen forever
-│  distilled humanizer block     ~250 tok         │
+│  role + answer format                           │  frozen forever
+│  distilled humanizer block                      │
+│  worked example                                 │
 └─────────────────────────────────── [BREAKPOINT 1]
 ┌─ user, block 1 ─────────────────────────────────┐
-│  transcript, single joined text block           │  append-only
-└─────────────────────────────────── [BREAKPOINT 2]
+│  transcript, single joined text block           │  append-only, uncached
+└─────────────────────────────────────────────────┘
 ┌─ user, block 2 ─────────────────────────────────┐
 │  mode instruction (+ typed query)               │  volatile, uncached
 └─────────────────────────────────────────────────┘
@@ -200,10 +204,27 @@ The transcript is one joined text block rather than one block per turn. Per-turn
 blocks would blow through the 20-block cache lookback window in about ten
 exchanges and silently stop hitting.
 
-1-hour TTL. Presses land 1-3 minutes apart so 5m would mostly survive, but
-"mostly" means writing gap-detection logic. Over a 20-press conversation the
-1-hour TTL costs about seven cents more, which buys never thinking about press
-timing.
+1-hour TTL on the one breakpoint that remains.
+
+**An earlier version of this design put a second breakpoint on the transcript.
+That was wrong, and expensively so.** Caching is a prefix match evaluated at
+block boundaries. The transcript grows between every press, so that block never
+matches a prior prefix: it wrote a fresh entry every press at the 1-hour TTL's
+2× write premium, and read one back essentially never. The largest and
+fastest-growing block in the prompt was billed at 2× where no breakpoint at all
+would have billed it at 1×.
+
+The diagnostic could not see it either. Logging `cache_read_input_tokens` was
+supposed to catch exactly this, but the system breakpoint genuinely does hit, so
+the number reads non-zero while the transcript misses every time. With one
+breakpoint left, "zero cache reads means an invalidator got in" is a true signal
+again.
+
+Second constraint, found the same way: Opus 5 will not cache a prefix below 512
+tokens, silently. `SYSTEM` measured around 516 — four tokens of margin — and
+`config.NAME` is substituted into it, so a short `ASSISTANT_NAME` could drop it
+under the floor and kill caching entirely with no error. The worked example in
+part 3 of the prompt exists partly to buy that margin.
 
 ### Cache killers
 
@@ -347,6 +368,17 @@ what they ban. It is kept to twelve words and paired with the positive form for
 that reason. Expect to tune it after twenty real answers — if bullets start
 reading stilted, the banlist is the first suspect.
 
+### System, part 3 — worked example
+
+A short worked cue-card answer is appended to `SYSTEM`. It demonstrates the
+fragments-not-prose shape, varied bullet length, and a stated position — the
+things the rules above describe but do not show.
+
+It earns its place twice. One example of the target shape steers a model harder
+than a paragraph of instructions about that shape, and it also carries `SYSTEM`
+clear of the 512-token caching floor described above. See `assistant/prompts.py`
+for the current text.
+
 ### Mode tails (uncached)
 
 ```
@@ -369,7 +401,8 @@ wrong one.
 
 ## Testing
 
-Two automated checks, both pinning things that fail silently in production:
+Two checks were specified up front, both pinning things that fail silently in
+production:
 
 1. **Silent start.** Capture begins against an idle output endpoint, receives no
    packets, and the VAD gate treats it as silence. No timeout, no exception, and
@@ -377,14 +410,32 @@ Two automated checks, both pinning things that fail silently in production:
 2. **Buffer trim boundary.** The ring buffer trims at its cap without dropping or
    duplicating a sample across the wrap.
 
-Capture exclusion is verified manually: Win+Shift+S over the overlay region, and
-the overlay should be absent from the capture. It is a Win32 call against a live
-window, and mocking it would only prove the mock works.
+The suite grew to 49 during implementation, and the growth is the interesting
+part: nearly all of it came from review finding that a guard, an invariant, or a
+failure path had no test — the transcription loop's whole state machine, the
+cache-prefix invariant, the reentrancy guard, and the "API key never reaches the
+log" requirement all arrived that way.
+
+Three of those tests were originally written so that they passed against
+deliberately broken code. Each was caught by mutation — break the thing the test
+claims to pin, and check the test actually dies. That is now the standard for any
+test guarding a property rather than a return value, and it is worth more here
+than coverage percentage.
+
+Anything needing real audio hardware, a real screen, or a paid API call cannot be
+gated automatically. Those live in `docs/verification-checklist.md` as nine
+ordered manual checks. Capture exclusion is among them: it is a Win32 call
+against a live window, and mocking it would only prove the mock works.
 
 ## Scope
 
-In: dual tagged capture, VAD-gated local STT, two hotkeys, streaming answers,
+In: dual tagged capture, VAD-gated local STT, four hotkeys, streaming answers,
 always-on-top overlay, capture exclusion, prompt caching.
+
+Two of those hotkeys are utility rather than feature. An `overrideredirect`
+always-on-top window has no titlebar and no close button, so hide (Ctrl+Alt+H)
+and quit (Ctrl+Alt+Q) have no other route. They were not in the first draft of
+this scope line and are recorded here so the count stops looking like drift.
 
 Out: persistent transcript storage, meeting summaries, speaker diarization,
 packaging or installer, settings GUI, cloud sync.

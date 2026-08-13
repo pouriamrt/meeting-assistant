@@ -207,7 +207,6 @@ def test_turn_is_frozen():
         turn.text = "changed"
 
 
-# --- gate_loop -------------------------------------------------------------
 #
 # The loop carries two positions at once: `cursor` into the ring and `pending`
 # as a local accumulator. That interaction is the hardest logic in the project
@@ -354,7 +353,6 @@ def test_gate_loop_warns_once_when_the_ring_stalls(monkeypatch, caplog):
     )
 
 
-# --- prompts and request assembly ------------------------------------------
 
 
 def test_cache_prefix_is_identical_across_both_modes():
@@ -429,7 +427,6 @@ def test_query_tail_embeds_the_typed_question():
     )
 
 
-# --- main wiring: latest-press-wins reentrancy guard ------------------------
 #
 # No GUI, no hotkeys, no audio device needed here: _AnswerGate is plain
 # counter-and-lock logic, and a fake queue exercises it exactly as
@@ -531,7 +528,6 @@ def test_guarded_hotkey_survives_a_raising_callback(caplog):
     assert caplog.records, "the failure was swallowed without a log"
 
 
-# --- overlay: inline query entry, verified without opening a window --------
 #
 # Overlay.__init__ creates a real Tk window and calls SetWindowDisplayAffinity
 # - not something to do under pytest. __new__ bypasses __init__ entirely, and

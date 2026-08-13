@@ -4,6 +4,7 @@ import ctypes
 import logging
 import queue
 import tkinter as tk
+from collections.abc import Callable
 from ctypes import wintypes
 
 from . import config
@@ -28,6 +29,7 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 _BG = "#101014"
 _FG = "#e8e8ea"
+_FONT = ("Segoe UI", 12)
 
 
 def set_capture_excluded(root: tk.Tk, excluded: bool) -> None:
@@ -58,7 +60,7 @@ class Overlay:
             self.root,
             bg=_BG,
             fg=_FG,
-            font=("Segoe UI", 12),
+            font=_FONT,
             wrap="word",
             borderwidth=0,
             highlightthickness=0,
@@ -113,7 +115,7 @@ class Overlay:
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
 
-    def _open_query_entry(self, payload) -> None:
+    def _open_query_entry(self, payload: Callable[[str], None]) -> None:
         """Inline text entry packed into `self.root` instead of a modal
         dialog. A dialog is a Toplevel with its own HWND, and
         SetWindowDisplayAffinity is per-HWND and not inherited - a second
@@ -129,14 +131,14 @@ class Overlay:
             bg=_BG,
             fg=_FG,
             insertbackground=_FG,
-            font=("Segoe UI", 12),
+            font=_FONT,
             borderwidth=0,
             highlightthickness=0,
         )
         entry.pack(fill="x", side="bottom", padx=14, pady=(0, 12))
         entry.focus_set()
 
-        def submit(_event=None) -> None:
+        def submit(_event: "tk.Event | None" = None) -> None:
             typed = entry.get()
             entry.destroy()
             self._entry = None
@@ -153,7 +155,7 @@ class Overlay:
                 except Exception:
                     log.exception("query callback failed")
 
-        def cancel(_event=None) -> None:
+        def cancel(_event: "tk.Event | None" = None) -> None:
             entry.destroy()
             self._entry = None
 
