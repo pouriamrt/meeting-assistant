@@ -1,11 +1,12 @@
 import logging
 import threading
 import time
+from datetime import datetime
 
 import pytest
 import numpy as np
 
-from assistant import config
+from assistant import answer, config, prompts
 from assistant.audio_ring import AudioRing
 from assistant.capture import to_mono_16k
 from assistant.transcribe import Transcript, Turn, speech_spans
@@ -320,3 +321,65 @@ def test_gate_loop_survives_a_decode_failure(monkeypatch):
     tm.gate_loop(FakeRing(reads), "them", tr, StopAfter(9))
     assert len(calls) >= 2, "the loop died after the first failure"
     assert len(tr) == 0
+
+
+# --- prompts and request assembly ------------------------------------------
+
+
+def test_cache_prefix_is_identical_across_both_modes():
+    # Both hotkeys must share one cached prefix. If this drifts, every press
+    # pays full price and nothing in the output looks wrong.
+    text = "[them] what's your postgres experience"
+    a = answer.build_request(text, prompts.last_question_tail())
+    b = answer.build_request(text, prompts.query_tail("migrations?"))
+
+    assert a["system"] == b["system"]
+    assert a["messages"][0]["content"][0] == b["messages"][0]["content"][0]
+    assert a["messages"][0]["content"][1] != b["messages"][0]["content"][1]
+
+
+def test_system_prompt_carries_nothing_volatile():
+    assert str(datetime.now().year) not in prompts.SYSTEM
+    assert "{" not in prompts.SYSTEM and "}" not in prompts.SYSTEM
+
+
+def test_system_prompt_is_stable_across_calls():
+    first = answer.build_request("x", "tail one")["system"]
+    second = answer.build_request("y", "tail two")["system"]
+    assert first == second
+
+
+def test_exactly_two_cache_breakpoints():
+    req = answer.build_request("transcript", "tail")
+    marked = [req["system"][0]]
+    marked += [b for b in req["messages"][0]["content"] if "cache_control" in b]
+    assert len(marked) == 2, "one on system, one on the transcript, none on the tail"
+    assert all(b["cache_control"]["ttl"] == "1h" for b in marked)
+
+
+def test_transcript_is_a_single_block():
+    # One block per turn would exhaust the 20-block cache lookback in about ten
+    # exchanges and stop hitting, silently.
+    req = answer.build_request("[them] a\n[me] b\n[them] c", "tail")
+    assert len(req["messages"][0]["content"]) == 2
+
+
+def test_request_omits_the_parameters_that_400_on_opus_5():
+    req = answer.build_request("t", "tail")
+    for banned in ("temperature", "top_p", "top_k", "thinking"):
+        assert banned not in req
+
+
+def test_request_pins_fast_mode_and_effort():
+    req = answer.build_request("t", "tail")
+    assert req["model"] == "claude-opus-5"
+    assert req["speed"] == "fast"
+    assert req["betas"] == ["fast-mode-2026-02-01"]
+    assert req["output_config"] == {"effort": "low"}
+    assert req["max_tokens"] == 2000
+
+
+def test_query_tail_embeds_the_typed_question():
+    assert "how do you handle migrations" in prompts.query_tail(
+        "how do you handle migrations"
+    )

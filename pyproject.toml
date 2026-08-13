@@ -22,3 +22,5 @@ pythonpath = ["."]
 
 [tool.pyright]
 extraPaths = ["."]
+venvPath = "."
+venv = ".venv"
