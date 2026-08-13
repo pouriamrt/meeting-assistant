@@ -19,3 +19,6 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.pyright]
+extraPaths = ["."]

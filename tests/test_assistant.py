@@ -3,6 +3,7 @@ import numpy as np
 
 from assistant import config
 from assistant.audio_ring import AudioRing
+from assistant.capture import to_mono_16k
 
 
 def test_api_key_missing_raises_loudly(monkeypatch):
@@ -99,3 +100,37 @@ def test_ring_does_not_retain_the_callers_buffer():
     buf[:] = 99.0
     samples, _ = ring.read_from(0)
     assert np.array_equal(samples, np.arange(4, dtype=np.float32))
+
+
+def test_to_mono_16k_downmixes_stereo():
+    # Two interleaved channels: left all 1.0, right all -1.0 averages to 0.0.
+    stereo = np.array([1.0, -1.0, 1.0, -1.0], dtype=np.float32)
+    out = to_mono_16k(stereo.tobytes(), channels=2, src_rate=16_000)
+    assert len(out) == 2
+    assert np.allclose(out, 0.0)
+
+
+def test_to_mono_16k_passes_through_at_native_rate():
+    mono = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+    out = to_mono_16k(mono.tobytes(), channels=1, src_rate=16_000)
+    assert np.allclose(out, mono)
+
+
+def test_to_mono_16k_resamples_48k_to_16k():
+    # One second of 48 kHz must come back as one second of 16 kHz.
+    mono = np.zeros(48_000, dtype=np.float32)
+    out = to_mono_16k(mono.tobytes(), channels=1, src_rate=48_000)
+    assert abs(len(out) - 16_000) <= 2, f"expected ~16000 samples, got {len(out)}"
+
+
+def test_to_mono_16k_always_returns_float32():
+    stereo = np.array([0.5, 0.5], dtype=np.float32)
+    out = to_mono_16k(stereo.tobytes(), channels=2, src_rate=44_100)
+    assert out.dtype == np.float32
+
+
+def test_to_mono_16k_handles_an_empty_packet():
+    # An idle output endpoint delivers zero-length packets rather than erroring.
+    out = to_mono_16k(b"", channels=2, src_rate=48_000)
+    assert len(out) == 0
+    assert out.dtype == np.float32
