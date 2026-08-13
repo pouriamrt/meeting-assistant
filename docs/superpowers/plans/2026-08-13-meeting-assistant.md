@@ -1748,9 +1748,21 @@ class _AnswerGate:
             generation = self._generation
         return _GenerationQueue(ui_queue, generation, self)
 
-    def is_current(self, generation: int) -> bool:
+    def put_if_current(
+        self, generation: int, ui_queue: "queue.Queue", item: tuple
+    ) -> None:
+        """Check the generation and put in one atomic step.
+
+        Checking and then putting are two operations, and a second press
+        landing between them lets a superseded token through - the exact
+        interleaving this guard exists to prevent. A lock around the counter
+        alone does not make check-then-act atomic. `queue.Queue.put` on an
+        unbounded queue never blocks, so holding the lock across it is cheap
+        and cannot deadlock.
+        """
         with self._lock:
-            return generation == self._generation
+            if generation == self._generation:
+                ui_queue.put(item)
 
 
 class _GenerationQueue:
@@ -1769,8 +1781,7 @@ class _GenerationQueue:
         self._gate = gate
 
     def put(self, item: tuple) -> None:
-        if self._gate.is_current(self._generation):
-            self._ui_queue.put(item)
+        self._gate.put_if_current(self._generation, self._ui_queue, item)
 
 
 def _guarded(label: str, fn: Callable[[], None]) -> Callable[[], None]:
