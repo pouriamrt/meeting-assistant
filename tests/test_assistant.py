@@ -448,13 +448,10 @@ class _FakeQueue:
 
 
 def test_api_key_never_reaches_the_log_or_the_ui(monkeypatch, caplog):
-    # Pins the real property: the value config.api_key() would read is never
-    # interpolated into a log message or put on the ui_queue. The fake
-    # exception's message deliberately does NOT embed the key - the real
-    # Anthropic SDK never echoes an API key back in an error, and
-    # log.exception() legitimately logs a full traceback for local
-    # debugging, so a canary planted inside the exception message itself
-    # would trip on that normal traceback text rather than on a real leak.
+    # The exception message DOES carry the canary - that's what makes this
+    # test able to fail. A canary the exception never contains can never
+    # trip, regardless of what stream_answer does with it (see the fix
+    # report for the earlier version of this test, which had that flaw).
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-canary-value")
 
     class Boom:
@@ -462,13 +459,25 @@ def test_api_key_never_reaches_the_log_or_the_ui(monkeypatch, caplog):
             class messages:
                 @staticmethod
                 def stream(**kw):
-                    raise RuntimeError("401 unauthorized")
+                    raise RuntimeError("401 for key sk-ant-canary-value")
 
     q = _FakeQueue()
     with caplog.at_level(logging.ERROR):
         answer.stream_answer(Boom(), "[them] hi", "tail", q)
-    assert "sk-ant-canary-value" not in caplog.text
+
+    # The real requirement: nothing key-shaped reaches the ui_queue, which
+    # feeds the screen-shared overlay.
     assert not any("sk-ant-canary-value" in str(i) for i in q.items)
+
+    # log.exception() legitimately writes a traceback containing str(exc) -
+    # that's normal local debugging output, not a leak, so asserting against
+    # caplog.text (which includes the traceback) is a false positive by
+    # construction. getMessage() excludes the traceback and only reflects
+    # what the log call itself formatted, so this still catches a real
+    # regression like log.exception("answer failed: %s", exc).
+    assert not any(
+        "sk-ant-canary-value" in r.getMessage() for r in caplog.records
+    )
 
 
 def test_answer_gate_drops_puts_from_a_superseded_generation():
@@ -659,3 +668,28 @@ def test_entry_escape_destroys_without_calling_back(monkeypatch):
     assert entry.destroyed
     assert ov._entry is None
     assert called == []
+
+
+def test_entry_return_with_a_raising_callback_logs_and_does_not_propagate(
+    monkeypatch, caplog
+):
+    # submit is a Tk event binding, not code inside _drain's try - an
+    # uncaught exception here would otherwise reach Tk's
+    # report_callback_exception (stderr only) instead of this module's log.
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+
+    def boom(typed):
+        raise RuntimeError("callback exploded")
+
+    ov.ui_queue = _FakeUiQueue([("prompt", boom)])
+    ov._drain()
+    entry = ov._entry
+    entry.text = "trigger the boom"
+
+    with caplog.at_level(logging.ERROR):
+        entry.bindings["<Return>"]()  # must not raise
+
+    assert entry.destroyed
+    assert ov._entry is None
+    assert caplog.records, "the failure was swallowed without a log"

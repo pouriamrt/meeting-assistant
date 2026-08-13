@@ -141,9 +141,17 @@ class Overlay:
             entry.destroy()
             self._entry = None
             # Destroyed before invoking payload, so a raising callback
-            # cannot leave a stray widget behind.
+            # cannot leave a stray widget behind. Guarded like every other
+            # caller-supplied callback in this file: submit is a Tk event
+            # binding, not code running inside _drain's try, so an
+            # uncaught exception here would reach Tk's
+            # report_callback_exception (stderr only) instead of this
+            # module's log.
             if typed:
-                payload(typed)
+                try:
+                    payload(typed)
+                except Exception:
+                    log.exception("query callback failed")
 
         def cancel(_event=None) -> None:
             entry.destroy()
