@@ -1,16 +1,28 @@
 """Always-on-top cue card overlay, excluded from screen capture."""
 
 import ctypes
+import logging
 import queue
 import tkinter as tk
 import tkinter.simpledialog  # noqa: F401  - submodule needs an explicit import
+from ctypes import wintypes
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 # use_last_error is required. Loading through plain ctypes.windll leaves
 # ctypes.get_last_error() at 0 even when the call failed, so the raised error
 # would say "success" while the overlay sits visible in the screen share.
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+# Declare the signatures. Without these ctypes marshals HWNDs as C int, which
+# is 32 bits on 64-bit Windows — a truncation hazard on the one call chain
+# whose correctness is a security property.
+_user32.GetParent.argtypes = [wintypes.HWND]
+_user32.GetParent.restype = wintypes.HWND
+_user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+_user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
 
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -58,6 +70,7 @@ class Overlay:
         self.text.configure(state="disabled")
 
         self._visible = True
+        self._alive = True  # cleared on quit, so the drain stops rescheduling
         # Fully transparent until exclusion is confirmed. The window has to be
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
@@ -104,29 +117,44 @@ class Overlay:
         try:
             while True:
                 kind, payload = self.ui_queue.get_nowait()
-                if kind == "clear":
-                    self._clear()
-                elif kind == "token":
-                    self._write(payload)
-                elif kind == "status":
-                    self._clear()
-                    self._write(payload)
-                elif kind == "prompt":
-                    # Dialogs must be built on the thread that owns the
-                    # mainloop; payload is a callback taking the typed string.
-                    typed = tk.simpledialog.askstring(
-                        "query", "ask:", parent=self.root
-                    )
-                    if typed:
-                        payload(typed)
-                elif kind == "toggle":
-                    self.toggle_visible()
-                elif kind == "quit":
-                    self.root.destroy()
-                    return
+                try:
+                    if kind == "clear":
+                        self._clear()
+                    elif kind == "token":
+                        self._write(payload)
+                    elif kind == "status":
+                        self._clear()
+                        self._write(payload)
+                    elif kind == "prompt":
+                        # Dialogs must be built on the thread that owns the
+                        # mainloop; payload is a callback taking the typed
+                        # string.
+                        typed = tk.simpledialog.askstring(
+                            "query", "ask:", parent=self.root
+                        )
+                        if typed:
+                            payload(typed)
+                    elif kind == "toggle":
+                        self.toggle_visible()
+                    elif kind == "quit":
+                        self._alive = False
+                        self.root.destroy()
+                        return
+                except Exception:
+                    # One bad message must not kill the drain. This callback
+                    # is the overlay's only channel — including its own quit
+                    # path — and Tk swallows exceptions raised inside an
+                    # `after` callback to stderr, so the death would be both
+                    # silent and permanent. `prompt` payloads are
+                    # caller-supplied code and the likeliest trigger.
+                    log.exception("overlay message %r failed", kind)
         except queue.Empty:
             pass
-        self.root.after(50, self._drain)
+        finally:
+            # In `finally`, not after the try: an escaping exception would
+            # otherwise skip the reschedule and stop the loop forever.
+            if self._alive:
+                self.root.after(50, self._drain)
 
     def toggle_visible(self) -> None:
         # Alpha, not withdraw/deiconify: unmapping can hand back a different
