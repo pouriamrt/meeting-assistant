@@ -1203,6 +1203,18 @@ git commit -m "feat: add prompts and cached request assembly"
 - Consumes: `config.EXCLUDE_FROM_CAPTURE`
 - Produces: `Overlay(ui_queue: queue.Queue)` with `.root: tk.Tk`,
   `.run() -> None`, `.toggle_visible() -> None`
+- Queue protocol, `(kind, payload)` tuples — every producer runs off the main
+  thread, so this is the only way anything reaches a widget:
+
+  | kind | payload | effect |
+  |---|---|---|
+  | `"clear"` | `None` | empty the pane |
+  | `"token"` | `str` | append text |
+  | `"status"` | `str` | replace the pane with one message |
+  | `"done"` | `None` | ignored by the overlay; marks end of stream |
+  | `"prompt"` | `Callable[[str], None]` | show an input dialog, call back with the typed string |
+  | `"toggle"` | `None` | hide or show |
+  | `"quit"` | `None` | destroy the window and end the mainloop |
 
 - [ ] **Step 1: Write the implementation**
 
@@ -1217,6 +1229,7 @@ exactly the silent failure the loud-failure rule exists to prevent.
 import ctypes
 import queue
 import tkinter as tk
+import tkinter.simpledialog  # noqa: F401  - submodule needs an explicit import
 
 from . import config
 
@@ -1313,6 +1326,14 @@ class Overlay:
                 elif kind == "status":
                     self._clear()
                     self._write(payload)
+                elif kind == "prompt":
+                    # Dialogs must be built on the thread that owns the
+                    # mainloop; payload is a callback taking the typed string.
+                    typed = tk.simpledialog.askstring(
+                        "query", "ask:", parent=self.root
+                    )
+                    if typed:
+                        payload(typed)
                 elif kind == "toggle":
                     self.toggle_visible()
                 elif kind == "quit":
@@ -1413,8 +1434,6 @@ only ever put onto a queue or spawn a thread — never touch a widget:
 import logging
 import queue
 import threading
-import tkinter as tk
-import tkinter.simpledialog
 
 import anthropic
 
@@ -1460,15 +1479,17 @@ def main() -> None:
         ).start()
 
     def on_query() -> None:
-        # Prompt on the main thread; the hotkey fires on pynput's thread.
-        def ask() -> None:
-            q = tk.simpledialog.askstring("query", "ask:", parent=overlay.root)
-            if q:
-                threading.Thread(
-                    target=answer_thread, args=(prompts.query_tail(q),), daemon=True
-                ).start()
+        # This fires on pynput's thread, which must never touch a widget.
+        # Hand the dialog to the main thread over the queue, like everything
+        # else, and get the typed string back through this callback.
+        def on_typed(typed: str) -> None:
+            threading.Thread(
+                target=answer_thread,
+                args=(prompts.query_tail(typed),),
+                daemon=True,
+            ).start()
 
-        overlay.root.after(0, ask)
+        ui_queue.put(("prompt", on_typed))
 
     def on_toggle() -> None:
         ui_queue.put(("toggle", None))
