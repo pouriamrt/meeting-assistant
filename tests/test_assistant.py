@@ -401,6 +401,7 @@ def test_query_tail_embeds_the_typed_question():
 # counter-and-lock logic, and a fake queue exercises it exactly as
 # `answer.stream_answer` would.
 
+import assistant.main as main_mod  # noqa: E402
 from assistant.main import _AnswerGate  # noqa: E402
 
 
@@ -449,3 +450,15 @@ def test_answer_gate_lets_puts_through_before_any_later_press():
     only.put(("token", "b"))
 
     assert fake.items == [("token", "a"), ("token", "b")]
+
+
+def test_guarded_hotkey_survives_a_raising_callback(caplog):
+    # pynput kills its entire listener thread on an uncaught callback
+    # exception - every hotkey dead at once, silently, app still running.
+    def boom() -> None:
+        raise RuntimeError("callback exploded")
+
+    wrapped = main_mod._guarded("boom", boom)
+    with caplog.at_level(logging.ERROR):
+        wrapped()  # must not raise
+    assert caplog.records, "the failure was swallowed without a log"
