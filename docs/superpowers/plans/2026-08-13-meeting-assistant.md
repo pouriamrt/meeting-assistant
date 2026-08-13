@@ -308,6 +308,30 @@ def test_ring_read_past_the_end_is_empty_not_an_error():
     samples, start = ring.read_from(3)
     assert len(samples) == 0
     assert start == 3
+
+
+def test_ring_evicts_whole_chunks_under_many_small_writes():
+    # The realistic capture pattern: many small same-size writes. This drives
+    # the whole-chunk eviction path, which the straddle test never reaches —
+    # there the overflow lands inside the final chunk and only trims it.
+    ring = AudioRing(max_samples=5)
+    for i in range(0, 20, 2):
+        ring.write(np.arange(i, i + 2, dtype=np.float32))
+    samples, start = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(15, 20, dtype=np.float32))
+    assert start == 15
+    assert ring.total_written == 20
+
+
+def test_ring_does_not_retain_the_callers_buffer():
+    # A capture backend may reuse one buffer for every frame. What the ring
+    # hands back must not change when the caller overwrites its own array.
+    ring = AudioRing(max_samples=10)
+    buf = np.arange(4, dtype=np.float32)
+    ring.write(buf)
+    buf[:] = 99.0
+    samples, _ = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(4, dtype=np.float32))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -356,6 +380,9 @@ class AudioRing:
     def write(self, samples: np.ndarray) -> None:
         if len(samples) == 0:
             return
+        # Copy: a capture backend may hand us a view onto a buffer it reuses
+        # for the next frame, and the ring retains whatever it is given.
+        samples = np.array(samples, dtype=np.float32, copy=True)
         with self._lock:
             self._chunks.append(samples)
             self._held += len(samples)
@@ -379,13 +406,23 @@ class AudioRing:
         A returned start greater than `abs_index` means audio was dropped
         before the reader got to it.
         """
+        # Snapshot under the lock, concatenate outside it. Holding the lock
+        # across an O(max_samples) concatenate makes the writer wait on the
+        # reader, which is the one thing this class exists to prevent — a
+        # stalled WASAPI callback is an audible dropout in the live call.
+        # The snapshot is a consistent point-in-time view: `write` only
+        # appends, pops, or replaces deque slots, never mutates a retained
+        # chunk in place.
         with self._lock:
-            start = max(abs_index, self._dropped)
-            end = self._dropped + self._held
-            if start >= end:
-                return np.zeros(0, dtype=np.float32), start
-            joined = np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
-            return joined[start - self._dropped:].copy(), start
+            chunks = list(self._chunks)
+            dropped = self._dropped
+            held = self._held
+
+        start = max(abs_index, dropped)
+        if start >= dropped + held:
+            return np.zeros(0, dtype=np.float32), start
+        joined = np.concatenate(chunks)
+        return joined[start - dropped:], start
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
