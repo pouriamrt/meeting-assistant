@@ -47,9 +47,25 @@ listing options neutrally. They're asking to hear judgment, not a menu.
 UNCERTAINTY IS HUMAN. "Not sure at that scale" is a real bullet.
 Confident filler is the failure mode; admitting a gap isn't."""
 
+_EXAMPLE = """EXAMPLE
+Question: "How would you handle caching for a read-heavy API?"
+
+- Redis, 5min TTL. Cuts DB load ~90% at typical traffic.
+- Invalidate on write, not on a schedule.
+- Stampede risk past ~50k concurrent reads - add a lock.
+- Haven't pushed this past 10x our current scale."""
+
 # Built once at import. Never rebuild this per request — one stray byte and the
 # cache misses silently at ten times the price.
-SYSTEM = _ROLE.replace("{NAME}", config.NAME) + "\n\n" + _HUMANIZER
+#
+# Must stay above 512 tokens (Opus 5's minimum cacheable prefix) or this
+# block silently stops caching - no error, cache_creation_input_tokens: 0.
+# config.NAME is substituted in below, so a short ASSISTANT_NAME shortens
+# this. Confirm the exact count with client.messages.count_tokens rather
+# than estimating from characters.
+SYSTEM = (
+    _ROLE.replace("{NAME}", config.NAME) + "\n\n" + _HUMANIZER + "\n\n" + _EXAMPLE
+)
 
 _PREAMBLE = (
     "Transcript above is live. [them] is the other person, [me] is you.\n"

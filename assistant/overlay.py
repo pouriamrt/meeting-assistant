@@ -4,7 +4,6 @@ import ctypes
 import logging
 import queue
 import tkinter as tk
-import tkinter.simpledialog  # noqa: F401  - submodule needs an explicit import
 from ctypes import wintypes
 
 from . import config
@@ -71,6 +70,7 @@ class Overlay:
 
         self._visible = True
         self._alive = True  # cleared on quit, so the drain stops rescheduling
+        self._entry: tk.Entry | None = None  # inline query input, see _open_query_entry
         # Fully transparent until exclusion is confirmed. The window has to be
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
@@ -113,11 +113,54 @@ class Overlay:
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
 
+    def _open_query_entry(self, payload) -> None:
+        """Inline text entry packed into `self.root` instead of a modal
+        dialog. A dialog is a Toplevel with its own HWND, and
+        SetWindowDisplayAffinity is per-HWND and not inherited - a second
+        window would be visible to the screen share. One window, one HWND,
+        already excluded.
+        """
+        if self._entry is not None:
+            self._entry.focus_set()
+            return
+
+        entry = tk.Entry(
+            self.root,
+            bg=_BG,
+            fg=_FG,
+            insertbackground=_FG,
+            font=("Segoe UI", 12),
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        entry.pack(fill="x", side="bottom", padx=14, pady=(0, 12))
+        entry.focus_set()
+
+        def submit(_event=None) -> None:
+            typed = entry.get()
+            entry.destroy()
+            self._entry = None
+            # Destroyed before invoking payload, so a raising callback
+            # cannot leave a stray widget behind.
+            if typed:
+                payload(typed)
+
+        def cancel(_event=None) -> None:
+            entry.destroy()
+            self._entry = None
+
+        entry.bind("<Return>", submit)
+        entry.bind("<Escape>", cancel)
+        self._entry = entry
+
     def _drain(self) -> None:
         try:
             while True:
-                kind, payload = self.ui_queue.get_nowait()
+                item = self.ui_queue.get_nowait()
                 try:
+                    # Unpack inside the guard too: a malformed item must not
+                    # raise past both excepts.
+                    kind, payload = item
                     if kind == "clear":
                         self._clear()
                     elif kind == "token":
@@ -126,20 +169,21 @@ class Overlay:
                         self._clear()
                         self._write(payload)
                     elif kind == "prompt":
-                        # Dialogs must be built on the thread that owns the
+                        # Entry must be built on the thread that owns the
                         # mainloop; payload is a callback taking the typed
                         # string.
-                        typed = tk.simpledialog.askstring(
-                            "query", "ask:", parent=self.root
-                        )
-                        if typed:
-                            payload(typed)
+                        self._open_query_entry(payload)
                     elif kind == "toggle":
                         self.toggle_visible()
                     elif kind == "quit":
                         self._alive = False
                         self.root.destroy()
                         return
+                    elif kind != "done":
+                        # "done" is deliberately unhandled here. Anything
+                        # else is protocol drift and worth a log line
+                        # instead of silently doing nothing.
+                        log.warning("unknown ui message %r", kind)
                 except Exception:
                     # One bad message must not kill the drain. This callback
                     # is the overlay's only channel — including its own quit
@@ -147,7 +191,7 @@ class Overlay:
                     # `after` callback to stderr, so the death would be both
                     # silent and permanent. `prompt` payloads are
                     # caller-supplied code and the likeliest trigger.
-                    log.exception("overlay message %r failed", kind)
+                    log.exception("overlay message %r failed", item)
         except queue.Empty:
             pass
         finally:

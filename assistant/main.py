@@ -77,8 +77,8 @@ class _GenerationQueue:
 def _guarded(label: str, fn: Callable[[], None]) -> Callable[[], None]:
     """Wrap a hotkey callback so one failure logs instead of killing
     pynput's listener thread - the same event-loop-dies-silently shape
-    already guarded in the capture callback and the transcription gate
-    loop, now closed for the third caller on this codebase's list."""
+    already guarded in the capture callback, the transcription gate loop,
+    and the overlay drain."""
 
     def wrapped() -> None:
         try:
@@ -125,9 +125,15 @@ def main() -> None:
             gen_queue = answer_gate.start(ui_queue)
 
             def run() -> None:
-                answer.stream_answer(
-                    client, transcript.render(), tail, cast(queue.Queue, gen_queue)
-                )
+                # stream_answer guards its own streaming call, but not the
+                # ui_queue.put("clear") or usage-logging around it - same
+                # dies-silently shape as _guarded, so it gets the same wrap.
+                try:
+                    answer.stream_answer(
+                        client, transcript.render(), tail, cast(queue.Queue, gen_queue)
+                    )
+                except Exception:
+                    log.exception("answer thread failed")
 
             threading.Thread(target=run, daemon=True).start()
 
@@ -142,7 +148,7 @@ def main() -> None:
 
         def on_query() -> None:
             # This fires on pynput's thread, which must never touch a widget.
-            # Hand the dialog to the main thread over the queue, like
+            # Hand the query entry to the main thread over the queue, like
             # everything else, and get the typed string back through this
             # callback.
             def on_typed(typed: str) -> None:

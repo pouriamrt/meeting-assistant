@@ -123,9 +123,15 @@ class Capture:
 
     def stop(self) -> None:
         for stream in self._streams:
-            stream.stop_stream()
-            stream.close()
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                log.exception("failed to close a capture stream")
         self._streams.clear()
         if self._pa is not None:
-            self._pa.terminate()
+            try:
+                self._pa.terminate()
+            except Exception:
+                log.exception("failed to terminate the PyAudio session")
             self._pa = None

@@ -1,4 +1,5 @@
 import logging
+import queue
 import threading
 import time
 from datetime import datetime
@@ -82,6 +83,14 @@ def test_ring_read_past_the_end_is_empty_not_an_error():
     samples, start = ring.read_from(3)
     assert len(samples) == 0
     assert start == 3
+
+
+def test_ring_read_from_a_ring_that_has_never_been_written():
+    # gate_loop's first tick, before any audio arrives. Without the empty-deque
+    # guard np.concatenate([]) raises and both gate threads log on every tick.
+    samples, start = AudioRing(max_samples=10).read_from(0)
+    assert len(samples) == 0
+    assert start == 0
 
 
 def test_ring_evicts_whole_chunks_under_many_small_writes():
@@ -209,14 +218,22 @@ import assistant.transcribe as tm  # noqa: E402
 
 
 class FakeRing:
-    """Hands out scripted (samples, start) pairs in place of a real ring."""
+    """Hands out scripted (samples, start) pairs in place of a real ring.
+
+    total_written mirrors the real AudioRing's: it advances with each
+    scripted read that delivers samples, and holds once the script runs dry
+    - gate_loop's stall detector reads it exactly like the real ring.
+    """
 
     def __init__(self, reads):
         self._reads = list(reads)
+        self.total_written = 0
 
     def read_from(self, abs_index):
         if self._reads:
-            return self._reads.pop(0)
+            samples, start = self._reads.pop(0)
+            self.total_written = start + len(samples)
+            return samples, start
         return np.zeros(0, dtype=np.float32), abs_index
 
 
@@ -323,6 +340,20 @@ def test_gate_loop_survives_a_decode_failure(monkeypatch):
     assert len(tr) == 0
 
 
+def test_gate_loop_warns_once_when_the_ring_stalls(monkeypatch, caplog):
+    # Unplugging a headset mid-meeting produces no exception - WASAPI just
+    # stops invoking the callback, so total_written never moves. Lower the
+    # threshold via the module constant so this doesn't need a real 30s run.
+    monkeypatch.setattr(tm, "_STALL_TICKS", 3)
+    monkeypatch.setattr(tm, "speech_spans", lambda a: [])
+    ring = FakeRing([])  # no scripted reads: total_written stays at 0 forever
+    with caplog.at_level(logging.WARNING):
+        tm.gate_loop(ring, "them", Transcript(max_turns=10), StopAfter(6))
+    assert caplog.text.count("delivered nothing for 30s") == 1, (
+        "must warn once at the threshold, not on every tick after it"
+    )
+
+
 # --- prompts and request assembly ------------------------------------------
 
 
@@ -357,14 +388,17 @@ def test_system_prompt_is_stable_across_calls():
     assert first[0]["text"] is second[0]["text"] is prompts.SYSTEM
 
 
-def test_exactly_two_cache_breakpoints():
+def test_only_the_system_block_is_cached():
+    # The transcript grows every press, so a breakpoint on it would never see
+    # a repeated prefix - it would write a fresh 1h-TTL entry (2x price) on
+    # nearly every press and get read back essentially never. Only the
+    # system block is byte-identical across presses.
     req = answer.build_request("transcript", "tail")
     system_block = req["system"][0]
     assert "cache_control" in system_block, "system block lost its breakpoint"
-    marked = [system_block]
-    marked += [b for b in req["messages"][0]["content"] if "cache_control" in b]
-    assert len(marked) == 2, "one on system, one on the transcript, none on the tail"
-    assert all(b["cache_control"]["ttl"] == "1h" for b in marked)
+    assert system_block["cache_control"]["ttl"] == "1h"
+    marked = [b for b in req["messages"][0]["content"] if "cache_control" in b]
+    assert marked == [], "the transcript and tail blocks must carry no cache_control"
 
 
 def test_transcript_is_a_single_block():
@@ -411,6 +445,30 @@ class _FakeQueue:
 
     def put(self, item):
         self.items.append(item)
+
+
+def test_api_key_never_reaches_the_log_or_the_ui(monkeypatch, caplog):
+    # Pins the real property: the value config.api_key() would read is never
+    # interpolated into a log message or put on the ui_queue. The fake
+    # exception's message deliberately does NOT embed the key - the real
+    # Anthropic SDK never echoes an API key back in an error, and
+    # log.exception() legitimately logs a full traceback for local
+    # debugging, so a canary planted inside the exception message itself
+    # would trip on that normal traceback text rather than on a real leak.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-canary-value")
+
+    class Boom:
+        class beta:
+            class messages:
+                @staticmethod
+                def stream(**kw):
+                    raise RuntimeError("401 unauthorized")
+
+    q = _FakeQueue()
+    with caplog.at_level(logging.ERROR):
+        answer.stream_answer(Boom(), "[them] hi", "tail", q)
+    assert "sk-ant-canary-value" not in caplog.text
+    assert not any("sk-ant-canary-value" in str(i) for i in q.items)
 
 
 def test_answer_gate_drops_puts_from_a_superseded_generation():
@@ -462,3 +520,142 @@ def test_guarded_hotkey_survives_a_raising_callback(caplog):
     with caplog.at_level(logging.ERROR):
         wrapped()  # must not raise
     assert caplog.records, "the failure was swallowed without a log"
+
+
+# --- overlay: inline query entry, verified without opening a window --------
+#
+# Overlay.__init__ creates a real Tk window and calls SetWindowDisplayAffinity
+# - not something to do under pytest. __new__ bypasses __init__ entirely, and
+# tk.Entry is replaced by a fake that records what the widget code does
+# instead of touching a real window. This covers the wiring; actual on-screen
+# behaviour (does the entry really sit inside the excluded HWND, does typing
+# work) needs a human at a real screen share - see the fix report.
+
+import assistant.overlay as overlay_mod  # noqa: E402
+
+
+class _FakeEntry:
+    """Stand-in for tk.Entry: records what the widget code does."""
+
+    def __init__(self, master, **kwargs):
+        self.master = master
+        self.kwargs = kwargs
+        self.packed = False
+        self.focused = False
+        self.destroyed = False
+        self.bindings = {}
+        self.text = ""
+
+    def pack(self, **kwargs):
+        self.packed = True
+
+    def focus_set(self):
+        self.focused = True
+
+    def bind(self, sequence, func):
+        self.bindings[sequence] = func
+
+    def get(self):
+        return self.text
+
+    def destroy(self):
+        self.destroyed = True
+
+
+class _FakeUiQueue:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def get_nowait(self):
+        if not self._items:
+            raise queue.Empty
+        return self._items.pop(0)
+
+
+def _bare_overlay():
+    """Overlay.__new__ skips __init__ - no Tk window, no capture-exclusion
+    syscall - so _drain's message handling can be unit tested in isolation."""
+    ov = overlay_mod.Overlay.__new__(overlay_mod.Overlay)
+    ov.root = object()  # never touched except as the fake Entry's master
+    ov._entry = None
+    ov._alive = False  # skip _drain's after() reschedule, no real Tk loop
+    return ov
+
+
+def test_prompt_message_opens_one_inline_entry_in_the_root(monkeypatch):
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+    ov.ui_queue = _FakeUiQueue([("prompt", lambda typed: None)])
+
+    ov._drain()
+
+    assert isinstance(ov._entry, _FakeEntry)
+    assert ov._entry.master is ov.root, "entry must live in the excluded root, not a new window"
+    assert ov._entry.packed
+    assert ov._entry.focused
+    assert ov._entry.kwargs["bg"] == overlay_mod._BG
+    assert ov._entry.kwargs["fg"] == overlay_mod._FG
+    assert ov._entry.kwargs["borderwidth"] == 0
+
+
+def test_prompt_message_reuses_an_already_open_entry(monkeypatch):
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+    ov.ui_queue = _FakeUiQueue([("prompt", lambda typed: None)])
+    ov._drain()
+    first = ov._entry
+    first.focused = False  # simulate focus having moved elsewhere
+
+    ov.ui_queue = _FakeUiQueue([("prompt", lambda typed: None)])
+    ov._drain()
+
+    assert ov._entry is first, "a second press must not stack a second entry"
+    assert first.focused
+
+
+def test_entry_return_destroys_before_calling_back_with_the_typed_text(monkeypatch):
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+    received = []
+    ov.ui_queue = _FakeUiQueue([("prompt", received.append)])
+    ov._drain()
+    entry = ov._entry
+    entry.text = "how do you handle migrations"
+
+    entry.bindings["<Return>"]()
+
+    assert entry.destroyed, "must be destroyed before the callback runs"
+    assert ov._entry is None
+    assert received == ["how do you handle migrations"]
+
+
+def test_entry_return_with_empty_text_does_not_call_back(monkeypatch):
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+    called = []
+    ov.ui_queue = _FakeUiQueue([("prompt", lambda typed: called.append(typed))])
+    ov._drain()
+    entry = ov._entry
+    entry.text = ""
+
+    entry.bindings["<Return>"]()
+
+    assert entry.destroyed
+    assert ov._entry is None
+    assert called == []
+
+
+def test_entry_escape_destroys_without_calling_back(monkeypatch):
+    monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
+    ov = _bare_overlay()
+    called = []
+    ov.ui_queue = _FakeUiQueue([("prompt", lambda typed: called.append(typed))])
+    ov._drain()
+    entry = ov._entry
+    entry.text = "should not be sent"
+
+    entry.bindings["<Escape>"]()
+
+    assert entry.destroyed
+    assert ov._entry is None
+    assert called == []

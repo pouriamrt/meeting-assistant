@@ -15,7 +15,10 @@ from .audio_ring import AudioRing
 
 log = logging.getLogger(__name__)
 
-# Silero processes 512-sample windows; anything shorter cannot be evaluated.
+# Defensive, not load-bearing: the library already returns [] on a short
+# buffer. Silero's window is 512 samples and a shorter buffer can't contain
+# speech worth evaluating, so the call is skipped rather than relied on to
+# no-op.
 _MIN_VAD_SAMPLES = 512
 
 # Our own trailing-silence timer closes utterances, so the VAD's internal
@@ -29,6 +32,10 @@ _GATE_OPTS = VadOptions(
 
 _SILENCE_SAMPLES = config.SAMPLE_RATE * config.SILENCE_END_MS // 1000
 _MAX_UTTERANCE_SAMPLES = config.SAMPLE_RATE * config.MAX_UTTERANCE_S
+
+# Ticks (at the 0.2s wait below) of a completely unchanged ring before the
+# stall warning fires - ~30s of no packets at all.
+_STALL_TICKS = 150
 
 _model: WhisperModel | None = None
 _model_lock = threading.Lock()
@@ -70,7 +77,7 @@ def speech_spans(audio: np.ndarray) -> list[dict]:
     """
     if len(audio) < _MIN_VAD_SAMPLES:
         return []
-    return get_speech_timestamps(audio, _GATE_OPTS)
+    return get_speech_timestamps(audio, _GATE_OPTS, sampling_rate=config.SAMPLE_RATE)
 
 
 def _get_model() -> WhisperModel:
@@ -108,6 +115,12 @@ def gate_loop(
     pending = np.zeros(0, dtype=np.float32)
     cursor = 0
     errors = 0
+    # Detects a stream that has stopped delivering entirely - unplug a
+    # headset or switch the default device mid-meeting and WASAPI simply
+    # stops invoking the callback, no exception, nothing for `errors` to
+    # count. total_written only advances on real writes, so a run of ticks
+    # with no change means nothing arrived at all.
+    last_total, stalled_ticks = ring.total_written, 0
 
     while not stop_event.is_set():
         try:
@@ -151,5 +164,16 @@ def gate_loop(
             if errors == 1 or errors % 100 == 0:
                 log.exception("gate loop failed on %s (%d errors)", src, errors)
             pending = np.zeros(0, dtype=np.float32)
+
+        total = ring.total_written
+        stalled_ticks = 0 if total != last_total else stalled_ticks + 1
+        last_total = total
+        if stalled_ticks == _STALL_TICKS:
+            # An idle output endpoint legitimately delivers nothing during
+            # quiet stretches, so `them` will trip this - warning, not
+            # error, and 30s is long enough that ordinary silence won't.
+            log.warning(
+                "%s capture has delivered nothing for 30s - device gone?", src
+            )
 
         stop_event.wait(0.2)
