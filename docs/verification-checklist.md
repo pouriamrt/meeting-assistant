@@ -1,0 +1,198 @@
+# Verification checklist
+
+Nothing in this project has ever been run against real hardware, a real screen, or a
+real API key. Every gate during the build was a unit test, a code read, or a
+falsification harness — all of which a machine can do, and none of which prove the
+thing works.
+
+These are the checks a machine could not perform. They are ordered so a failure stops
+you before the next one wastes your time.
+
+Set up first:
+
+    uv sync
+    export ANTHROPIC_API_KEY=sk-ant-...
+    export ASSISTANT_NAME="Your Name"
+
+---
+
+## 1. Capture reaches both rings
+
+Play music through the speakers and talk into the mic while this runs.
+
+    uv run python -c "
+    import time, numpy as np
+    from assistant.capture import Capture
+    c = Capture(); c.start()
+    print('Play audio and talk for 5 seconds...')
+    time.sleep(5)
+    c.stop()
+    m, _ = c.mic.read_from(0); s, _ = c.sys.read_from(0)
+    print(f'mic  {len(m):>7} samples  peak {np.abs(m).max() if len(m) else 0:.3f}')
+    print(f'sys  {len(s):>7} samples  peak {np.abs(s).max() if len(s) else 0:.3f}')
+    "
+
+**Expect:** both counts near 80000 (5 s at 16 kHz), both peaks above 0.01.
+A `sys` peak of 0.000 means nothing was playing. A `mic` peak of 0.000 means your
+microphone is not the Windows default input.
+
+## 2. A missing device fails loudly
+
+Disable the default input device in Windows Sound settings, then:
+
+    uv run python -c "from assistant.capture import Capture; Capture().start()"
+
+**Expect:** `RuntimeError: No default input device. Plug in a microphone and set it
+as the Windows default.` Re-enable the device afterwards.
+
+If you see a driver error instead of that message, the guard added for it is not
+working — that was a real defect found in review and the message is the evidence it
+was fixed.
+
+## 3. Transcription produces tagged turns
+
+First run downloads `base.en`, about 150 MB.
+
+    uv run python -c "
+    import threading, time
+    from assistant.capture import Capture
+    from assistant.transcribe import Transcript, gate_loop
+    from assistant import config
+    cap = Capture(); cap.start()
+    tr = Transcript(config.MAX_TURNS)
+    stop = threading.Event()
+    for ring, src in ((cap.mic, 'me'), (cap.sys, 'them')):
+        threading.Thread(target=gate_loop, args=(ring, src, tr, stop), daemon=True).start()
+    print('Talk into the mic and play some speech for 20 seconds...')
+    time.sleep(20)
+    stop.set(); cap.stop()
+    print(tr.render() or '(nothing transcribed)')
+    "
+
+**Expect:** tagged lines with recognisable text. Watch the latency between someone
+finishing a sentence and their turn appearing — it should be under about four
+seconds. If `[them]` works but `[me]` is empty, the mic is not the Windows default.
+
+## 4. The overlay renders
+
+    uv run python -c "
+    import queue, threading, time
+    from assistant.overlay import Overlay
+    q = queue.Queue()
+    o = Overlay(q)
+    def feed():
+        time.sleep(1)
+        for chunk in ['- Postgres, four years\n', '- Partitioned the writes table\n', '- Not sure past 10k TPS\n']:
+            q.put(('token', chunk)); time.sleep(0.4)
+    threading.Thread(target=feed, daemon=True).start()
+    o.run()
+    "
+
+**Expect:** a dark always-on-top box, top left, filling in line by line. Close with
+Alt+F4 or Ctrl+C in the terminal.
+
+## 5. The overlay is invisible to capture — the security check
+
+With the overlay from step 4 still running, press `Win+Shift+S` and drag a selection
+over the overlay region.
+
+**Expect:** the captured image shows the desktop *behind* the overlay. The overlay
+must be **absent**.
+
+If it appears, stop and diagnose before going further. Two known causes: passing
+`winfo_id()` without `GetParent`, and calling before the window is mapped.
+
+## 6. A failed exclusion refuses to show
+
+    uv run python -c "
+    import queue, assistant.overlay as ov
+    ov.WDA_EXCLUDEFROMCAPTURE = 0x00000002   # rejected flag, forces the call to fail
+    try:
+        ov.Overlay(queue.Queue()).run()
+        print('FAIL: overlay showed anyway')
+    except RuntimeError as e:
+        print('PASS:', e)
+    "
+
+**Expect:** `PASS: Screen-capture exclusion failed; ...` and no window appears.
+
+The injected flag is build-dependent. `0x2` is rejected on Windows 11 build 26200;
+`0x99` is *accepted* there, which would make this report a failure of its own premise
+rather than of the guard. If this ever reports `FAIL`, probe the flag directly before
+concluding the overlay is broken.
+
+## 7. The answer streams, and the cache engages
+
+Costs money — two real API calls.
+
+    uv run python -c "
+    import logging, queue, anthropic
+    from assistant import answer, prompts, config
+    logging.basicConfig(level=logging.INFO)
+    client = anthropic.Anthropic(api_key=config.api_key())
+    t = '[them] so how would you scale the write path on this?'
+    for i in (1, 2):
+        q = queue.Queue()
+        answer.stream_answer(client, t, prompts.last_question_tail(), q)
+        out = ''.join(v for k, v in iter(q.get, ('done', None)) if k == 'token')
+        print(f'--- press {i} ---'); print(out)
+    "
+
+**Expect:** cue-card bullets both times, and `cache_read=` above 0 on the second
+press. A second `cache_read=0` means the system prefix is not stable — check for
+anything volatile in `SYSTEM`.
+
+## 8. The system prompt clears the caching floor
+
+Also costs money, though `count_tokens` is cheap.
+
+    uv run python -c "
+    import anthropic
+    from assistant import prompts, config
+    c = anthropic.Anthropic(api_key=config.api_key())
+    r = c.messages.count_tokens(
+        model='claude-opus-5',
+        system=[{'type': 'text', 'text': prompts.SYSTEM}],
+        messages=[{'role': 'user', 'content': 'x'}],
+    )
+    print(r)
+    "
+
+**Expect:** comfortably above 512. Opus 5 will not cache a prefix below that, and it
+fails silently — no error, just no caching.
+
+`ASSISTANT_NAME` is substituted into `SYSTEM` at two sites, so re-run this with the
+shortest name you would realistically use. If it lands under about 600, add more
+content to `SYSTEM` rather than trimming it.
+
+## 9. End to end, against a real conversation
+
+A YouTube interview through the speakers works for a solo test.
+
+    uv run meeting-assistant
+
+Check each:
+
+1. Overlay appears, top left, always on top.
+2. Speech through the speakers becomes `[them]` turns (watch the log).
+3. Speech into the mic becomes `[me]` turns.
+4. `Ctrl+Space` streams bullets within a few seconds.
+5. `Ctrl+Shift+Space` opens an inline entry **inside the overlay** — not a separate
+   window. Type a question, press Return, get an answer. Escape cancels.
+6. **`Win+Shift+S` over the overlay while the query entry is open.** The entry must be
+   absent from the capture too. This was a real Critical: the original implementation
+   used a modal dialog, which is a separate window and was fully visible to screen
+   share while displaying the question being typed.
+7. Press `Ctrl+Space` twice a second apart. The second answer must replace the first
+   cleanly, not interleave with it.
+8. A second press logs `cache_read=` above 0.
+9. `Ctrl+Alt+H` hides and shows.
+10. `Ctrl+Alt+Q` exits cleanly, with no audio device left open.
+
+---
+
+## What this does not cover
+
+Exclusion covers screen capture and screen share. It does not cover an HDMI capture
+card on the monitor output, a camera pointed at the screen, or your eyes visibly
+tracking text. It solves the capture problem, not the tell problem.
