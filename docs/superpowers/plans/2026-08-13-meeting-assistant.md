@@ -1155,6 +1155,13 @@ def test_cache_prefix_is_identical_across_both_modes():
     assert a["messages"][0]["content"][0] == b["messages"][0]["content"][0]
     assert a["messages"][0]["content"][1] != b["messages"][0]["content"][1]
 
+    # Identity, not just equality. Equality alone passes even if SYSTEM were
+    # rebuilt per call with a clock value in it, because two calls issued
+    # microseconds apart land in the same wall-clock second. Identity proves
+    # the request reuses the frozen module constant.
+    assert a["system"][0]["text"] is prompts.SYSTEM
+    assert b["system"][0]["text"] is prompts.SYSTEM
+
 
 def test_system_prompt_carries_nothing_volatile():
     assert str(datetime.now().year) not in prompts.SYSTEM
@@ -1165,11 +1172,14 @@ def test_system_prompt_is_stable_across_calls():
     first = answer.build_request("x", "tail one")["system"]
     second = answer.build_request("y", "tail two")["system"]
     assert first == second
+    assert first[0]["text"] is second[0]["text"] is prompts.SYSTEM
 
 
 def test_exactly_two_cache_breakpoints():
     req = answer.build_request("transcript", "tail")
-    marked = [req["system"][0]]
+    system_block = req["system"][0]
+    assert "cache_control" in system_block, "system block lost its breakpoint"
+    marked = [system_block]
     marked += [b for b in req["messages"][0]["content"] if "cache_control" in b]
     assert len(marked) == 2, "one on system, one on the transcript, none on the tail"
     assert all(b["cache_control"]["ttl"] == "1h" for b in marked)
