@@ -31,6 +31,9 @@ class AudioRing:
     def write(self, samples: np.ndarray) -> None:
         if len(samples) == 0:
             return
+        # Copy: a capture backend may hand us a view onto a buffer it reuses
+        # for the next frame, and the ring retains whatever it is given.
+        samples = np.array(samples, dtype=np.float32, copy=True)
         with self._lock:
             self._chunks.append(samples)
             self._held += len(samples)
@@ -54,10 +57,20 @@ class AudioRing:
         A returned start greater than `abs_index` means audio was dropped
         before the reader got to it.
         """
+        # Snapshot under the lock, concatenate outside it. Holding the lock
+        # across an O(max_samples) concatenate makes the writer wait on the
+        # reader, which is the one thing this class exists to prevent — a
+        # stalled WASAPI callback is an audible dropout in the live call.
+        # The snapshot is a consistent point-in-time view: `write` only
+        # appends, pops, or replaces deque slots, never mutates a retained
+        # chunk in place.
         with self._lock:
-            start = max(abs_index, self._dropped)
-            end = self._dropped + self._held
-            if start >= end:
-                return np.zeros(0, dtype=np.float32), start
-            joined = np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
-            return joined[start - self._dropped:].copy(), start
+            chunks = list(self._chunks)
+            dropped = self._dropped
+            held = self._held
+
+        start = max(abs_index, dropped)
+        if start >= dropped + held:
+            return np.zeros(0, dtype=np.float32), start
+        joined = np.concatenate(chunks)
+        return joined[start - dropped:], start

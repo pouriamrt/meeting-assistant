@@ -75,3 +75,27 @@ def test_ring_read_past_the_end_is_empty_not_an_error():
     samples, start = ring.read_from(3)
     assert len(samples) == 0
     assert start == 3
+
+
+def test_ring_evicts_whole_chunks_under_many_small_writes():
+    # The realistic capture pattern: many small same-size writes. This drives
+    # the whole-chunk eviction path, which the straddle test never reaches —
+    # there the overflow lands inside the final chunk and only trims it.
+    ring = AudioRing(max_samples=5)
+    for i in range(0, 20, 2):
+        ring.write(np.arange(i, i + 2, dtype=np.float32))
+    samples, start = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(15, 20, dtype=np.float32))
+    assert start == 15
+    assert ring.total_written == 20
+
+
+def test_ring_does_not_retain_the_callers_buffer():
+    # A capture backend may reuse one buffer for every frame. What the ring
+    # hands back must not change when the caller overwrites its own array.
+    ring = AudioRing(max_samples=10)
+    buf = np.arange(4, dtype=np.float32)
+    ring.write(buf)
+    buf[:] = 99.0
+    samples, _ = ring.read_from(0)
+    assert np.array_equal(samples, np.arange(4, dtype=np.float32))
