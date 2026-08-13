@@ -689,3 +689,23 @@ def test_entry_return_with_a_raising_callback_logs_and_does_not_propagate(
     assert entry.destroyed
     assert ov._entry is None
     assert caplog.records, "the failure was swallowed without a log"
+
+
+def test_degenerate_decode_is_dropped():
+    # Observed live: a 0.8s low-energy segment decoded as the same short
+    # sentence twenty-nine times. Left in, it pollutes the transcript, the
+    # prompt built from it, and the cached prefix.
+    loop = " ".join(["There it goes."] * 29)
+    assert tm._is_degenerate(loop)
+
+
+def test_real_speech_is_not_mistaken_for_a_degenerate_decode():
+    real = (
+        "So tell me, how would you scale the write path on this system? "
+        "We're seeing about ten thousand writes a second. "
+        "The read side is fine. "
+        "What would you change first?"
+    )
+    assert not tm._is_degenerate(real)
+    assert not tm._is_degenerate("Yeah.")
+    assert not tm._is_degenerate("")

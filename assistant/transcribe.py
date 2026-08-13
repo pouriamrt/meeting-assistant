@@ -1,6 +1,7 @@
 """VAD-gated local transcription into a tagged in-memory transcript."""
 
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -92,6 +93,19 @@ def _get_model() -> WhisperModel:
     return _model
 
 
+def _is_degenerate(text: str) -> bool:
+    """True for whisper's loop-on-near-silence output.
+
+    Observed live: a 0.8s low-energy segment decoded as "There it goes."
+    repeated twenty-nine times. `condition_on_previous_text=False` reduces
+    this but does not eliminate it. Left in, it pollutes the transcript, the
+    prompt built from it, and the cached prefix - so it is dropped at the
+    source rather than filtered downstream.
+    """
+    parts = [p for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p]
+    return len(parts) >= 4 and len(set(parts)) == 1
+
+
 def transcribe(audio: np.ndarray) -> str:
     """Decode one utterance. Serialized: one model shared by both gates."""
     with _model_lock:
@@ -102,7 +116,11 @@ def transcribe(audio: np.ndarray) -> str:
             vad_filter=False,                 # already gated upstream
             condition_on_previous_text=False,  # avoids hallucination loops
         )
-        return " ".join(s.text.strip() for s in segments).strip()
+        text = " ".join(s.text.strip() for s in segments).strip()
+    if _is_degenerate(text):
+        log.info("dropped a degenerate decode: %.60s...", text)
+        return ""
+    return text
 
 
 def gate_loop(
@@ -121,6 +139,7 @@ def gate_loop(
     # count. total_written only advances on real writes, so a run of ticks
     # with no change means nothing arrived at all.
     last_total, stalled_ticks = ring.total_written, 0
+    last_arrival = time.monotonic()
 
     while not stop_event.is_set():
         try:
@@ -133,6 +152,7 @@ def gate_loop(
             cursor = start + len(new)
             if len(new):
                 pending = np.concatenate((pending, new))
+                last_arrival = time.monotonic()
 
             spans = speech_spans(pending)
             if not spans:
@@ -144,7 +164,21 @@ def gate_loop(
             else:
                 last_end = spans[-1]["end"]
                 trailing = len(pending) - last_end
-                if trailing >= _SILENCE_SAMPLES or len(pending) >= _MAX_UTTERANCE_SAMPLES:
+                # Silence measured two ways, because on the loopback channel
+                # only one of them ever happens. Trailing silence inside the
+                # buffer needs packets to keep arriving to accumulate - but an
+                # idle WASAPI output endpoint sends nothing at all, so when the
+                # other person stops talking their last utterance stops growing
+                # and would sit here undelivered until they spoke again. That is
+                # exactly the moment you press the hotkey to answer them, so the
+                # one turn you need would be the one missing. Wall-clock silence
+                # since the last packet closes it instead.
+                idle = (time.monotonic() - last_arrival) * 1000
+                if (
+                    trailing >= _SILENCE_SAMPLES
+                    or idle >= config.SILENCE_END_MS
+                    or len(pending) >= _MAX_UTTERANCE_SAMPLES
+                ):
                     speech = pending[spans[0]["start"]:last_end]
                     pending = pending[last_end:]
                     text = transcribe(speech)

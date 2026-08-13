@@ -393,6 +393,27 @@ Ctrl+Shift+Space
   Answer this using the transcript as context: {query}
 ```
 
+## Found in verification
+
+Two things only running it revealed, both recorded here because neither is
+visible in the code.
+
+**An utterance on the loopback channel needs a wall-clock timer, not just
+trailing silence in the buffer.** Trailing silence only accumulates while
+packets keep arriving, and an idle output endpoint sends none — so when the
+other person stopped talking, their last utterance sat undelivered until they
+spoke again. That is precisely when you press the hotkey to answer them, so the
+one turn you needed was the one guaranteed to be missing. The gate now closes on
+either measure. The two facts were each documented in this spec separately; the
+interaction between them was not.
+
+**Headphones are a functional requirement, not a preference.** On speakers the
+microphone hears the system audio, so every question the other person asks is
+transcribed twice — once as `[them]`, once as `[me]`. The Ctrl+Space prompt asks
+for the last `[them]` question that `[me]` has not answered, and the duplicate
+makes it look answered. Echo cancellation would fix it properly and is a
+subsystem; headphones fix it for free.
+
 ## Security
 
 API key from the environment. Never hardcoded, never logged, never written to the

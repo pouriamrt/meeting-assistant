@@ -8,6 +8,9 @@ thing works.
 These are the checks a machine could not perform. They are ordered so a failure stops
 you before the next one wastes your time.
 
+**Wear headphones for anything involving both channels.** On speakers the mic
+picks up the system audio and the same sentence is transcribed under both tags.
+
 Set up first:
 
     uv sync

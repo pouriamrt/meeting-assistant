@@ -9,6 +9,13 @@ Design: `docs/superpowers/specs/2026-08-13-meeting-assistant-design.md`
 
 Windows 10 build 19041 or later. CPU only — no GPU needed.
 
+**Use headphones.** On speakers the microphone hears the other person's voice
+coming out of them, so every question they ask is transcribed twice — once as
+`[them]` and again as `[me]`. That breaks the core feature: `Ctrl+Space` looks
+for the last question `[them]` asked that `[me]` has not answered, and a
+duplicate under your own tag makes it look answered. Measured, not theoretical —
+a sentence played through the speakers came back under both tags.
+
 ## Setup
 
     uv sync
