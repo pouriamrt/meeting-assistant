@@ -16,27 +16,25 @@ and answers into a window that screen capture cannot see.**
 <sub>The overlay itself, with an illustrative cue card in it.
 Screen capture normally cannot see this window at all.</sub>
 
+<br>
+
+[Requirements](#requirements) &nbsp;·&nbsp;
+[Setup](#setup) &nbsp;·&nbsp;
+[Hotkeys](#hotkeys) &nbsp;·&nbsp;
+[How it works](#how-it-works) &nbsp;·&nbsp;
+[Screen mode](#screen-mode) &nbsp;·&nbsp;
+[The overlay](#the-overlay) &nbsp;·&nbsp;
+[Tuning](#tuning) &nbsp;·&nbsp;
+[Tests](#tests) &nbsp;·&nbsp;
+[Scope](#scope)
+
 </div>
+
+---
 
 The audio never leaves the machine. It is captured, buffered, and transcribed
 on the local CPU, and only the resulting text goes to the API, plus a
 screenshot when you ask for one.
-
-Design notes: `docs/superpowers/specs/2026-08-13-meeting-assistant-design.md`
-
-## Contents
-
-|   |   |
-|---|---|
-| [Requirements](#requirements) | What it needs, and why headphones are not optional |
-| [Setup](#setup) | Four lines |
-| [Hotkeys](#hotkeys) | Every key and gesture |
-| [How it works](#how-it-works) | The pipeline, and what leaves the machine |
-| [Screen mode](#screen-mode) | Reading code off the screen |
-| [The overlay](#the-overlay) | Why it is built the way it is |
-| [Tuning](#tuning) | Symptom to knob |
-| [Tests](#tests) | What is covered, and what cannot be |
-| [Scope](#scope) | Where this stops |
 
 ## Requirements
 
@@ -146,13 +144,13 @@ presses reuse it. Tokens stream back into the overlay as they arrive.
 
 ## Screen mode
 
-`Ctrl+Alt+Space` sends a screenshot of every monitor **and** the transcript. The
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> sends a screenshot of every monitor **and** the transcript. The
 screen carries the signature, the starter code, the error. The transcript
 carries the constraints that are only ever spoken, things like "no built-ins" or
 "optimize for memory". Neither alone is enough, which is why both go.
 
 It answers under a second system prompt that writes real code instead of the
-spoken cue cards `Ctrl+Space` produces. On a diagram or a dashboard it falls
+spoken cue cards <kbd>Ctrl</kbd>+<kbd>Space</kbd> produces. On a diagram or a dashboard it falls
 back to bullets on its own.
 
 Monitors are sent as one image each, never stitched into one wide picture. Two
@@ -161,6 +159,11 @@ Monitors are sent as one image each, never stitched into one wide picture. Two
 read code off. Separate images each get their own scaling budget.
 
 ### Half resolution saves money, not time
+
+> [!IMPORTANT]
+> An earlier note here claimed half resolution made answers about twice as
+> fast. That was wrong: it compared two different questions with different
+> answer lengths. The corrected A/B is below.
 
 Screenshots go at half resolution by default (`SCREEN_HALF_RES`). Controlled
 A/B on one 1536x864 monitor, same question, four runs each, alternating:
