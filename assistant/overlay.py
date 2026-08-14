@@ -34,6 +34,8 @@ _FONT_SIZE = 12             # starting size only; Ctrl+wheel moves it at runtime
 
 _GRIP = "#2a2a32"           # just visible against _BG, not attention-grabbing
 _GRIP_PX = 16
+_DRAG_BAR_PX = 18           # the only surface that moves the window, so the
+                            # text body underneath stays selectable
 _MIN_W, _MIN_H = 240, 120   # below this the text is unreadable and the grip
                             # gets hard to hit, leaving no way to grow it back
 _FONT_MIN, _FONT_MAX = 8, 32
@@ -63,6 +65,16 @@ class Overlay:
         self.root.configure(bg=_BG)
         self.root.geometry("460x300+40+40")
 
+        # Packed before self.text so it claims the top strip; self.text then
+        # takes the rest with expand/fill.
+        self._drag_bar = tk.Frame(
+            self.root, bg=_GRIP, height=_DRAG_BAR_PX, cursor="fleur"
+        )
+        # Keeps its configured height because it has no children to shrink to
+        # - pack_propagate(False) was tried here and measured to change
+        # nothing, so it is not present.
+        self._drag_bar.pack(side="top", fill="x")
+
         self.text = tk.Text(
             self.root,
             bg=_BG,
@@ -78,8 +90,12 @@ class Overlay:
         self.text.configure(state="disabled")
 
         self._drag_from: tuple[int, int] | None = None
-        self._make_draggable(self.text)
-        self._make_draggable(self.root)
+        # Only the bar. Not self.text, and not self.root either: bindtags run
+        # the toplevel binding for events on any child, so a <Button-1> bound
+        # on root would fire for clicks in the text body and start a window
+        # drag instead of a selection.
+        self._make_draggable(self._drag_bar)
+        self._make_selectable()
 
         self._visible = True
         self._alive = True  # cleared on quit, so the drain stops rescheduling
@@ -150,6 +166,44 @@ class Overlay:
         widget.bind("<Button-1>", grab)
         widget.bind("<B1-Motion>", drag)
         widget.bind("<ButtonRelease-1>", drop)
+
+    def _make_selectable(self) -> None:
+        """Select with the mouse, copy with Ctrl+C.
+
+        Selection already worked on a state="disabled" Text - copying does not
+        modify it - so nothing here fights the read-only display. What blocked
+        it was the drag binding claiming <Button-1> first.
+
+        Focus is taken on release because an overrideredirect window has no
+        titlebar to click, and a keyboard binding never fires for a widget
+        that was never focused.
+        """
+        self.text.bind("<ButtonRelease-1>", lambda _e: self.text.focus_set())
+        for sequence in ("<Control-c>", "<Control-C>", "<<Copy>>"):
+            # Bound on the toplevel as well as the Text. A keyboard event goes
+            # to the focused widget, and if the window has OS focus while no
+            # child holds Tk focus it arrives at the toplevel instead - where
+            # a Text-only binding would never see it. _copy_selection returns
+            # "break", so the two bindings cannot both run for one keypress.
+            self.text.bind(sequence, self._copy_selection)
+            self.root.bind(sequence, self._copy_selection)
+
+    def _copy_selection(self, _event: "tk.Event | None" = None) -> str:
+        """Copy the selection, or do nothing if there is none.
+
+        A Text with no selection raises TclError for sel.first rather than
+        returning empty. Unhandled inside a Tk binding that reaches
+        report_callback_exception and lands on stderr, which nobody is
+        watching mid-interview.
+        """
+        try:
+            selected = self.text.get("sel.first", "sel.last")
+        except tk.TclError:
+            return "break"
+        if selected:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected)
+        return "break"
 
     def _make_resizable(self) -> tk.Frame:
         """Bottom-right grip. Same reason as the drag: overrideredirect(True)
@@ -306,12 +360,17 @@ class Overlay:
                     # raise past both excepts.
                     kind, payload = item
                     if kind == "clear":
+                        # Every answer starts with a clear, so this is where
+                        # a buried overlay comes back: press any hotkey and
+                        # it surfaces along with the answer.
                         self._clear()
+                        self._raise()
                     elif kind == "token":
                         self._write(payload)
                     elif kind == "status":
                         self._clear()
                         self._write(payload)
+                        self._raise()
                     elif kind == "prompt":
                         # Entry must be built on the thread that owns the
                         # mainloop; payload is a callback taking the typed
@@ -344,12 +403,36 @@ class Overlay:
             if self._alive:
                 self.root.after(50, self._drain)
 
+    def _raise(self) -> None:
+        """Put the window back on top of whatever buried it.
+
+        Always a recovery the user triggers, never something the app notices:
+        Tk reports -topmost 1 and winfo_viewable True even while another
+        window covers this one, so there is nothing to detect. And alpha
+        cannot change z-order, which is why Ctrl+Alt+H alone could not bring
+        it back.
+
+        Toggling -topmost off and on is what re-applies it; setting it True
+        when Tk already believes it is True does nothing, and lift() alone
+        does not outrank a window that is genuinely topmost. Neither touches
+        the HWND, so capture exclusion survives.
+
+        Deliberately not on a timer. A window that reclaims the front every
+        second fights every other topmost window on the desktop, which is a
+        worse neighbour than one you raise on purpose.
+        """
+        self.root.lift()
+        self.root.attributes("-topmost", False)
+        self.root.attributes("-topmost", True)
+
     def toggle_visible(self) -> None:
         # Alpha, not withdraw/deiconify: unmapping can hand back a different
         # HWND on remap, and display affinity lives on the HWND. Hiding must
         # not be able to silently drop capture exclusion.
         self._visible = not self._visible
         self.root.attributes("-alpha", 1.0 if self._visible else 0.0)
+        if self._visible:
+            self._raise()
 
     def run(self) -> None:
         self.root.mainloop()

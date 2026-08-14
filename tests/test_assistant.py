@@ -3,6 +3,7 @@ import queue
 import threading
 import time
 from datetime import datetime
+from typing import NamedTuple
 
 import pytest
 import numpy as np
@@ -622,7 +623,82 @@ class _FakeSct:
         return _FakeShot(f"rgb{mon['i']}".encode())
 
 
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    """Width and height out of the PNG IHDR. No Pillow in this project, and
+    trusting the value we passed in would test nothing."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    return (
+        int.from_bytes(data[16:20], "big"),
+        int.from_bytes(data[20:24], "big"),
+    )
+
+
+class _Size(NamedTuple):
+    width: int
+    height: int
+
+
+class _RealShot:
+    """Like an mss screenshot: rgb is width*height*3 bytes."""
+
+    def __init__(self, width, height):
+        self.size = _Size(width, height)
+        self.rgb = bytes(range(256)) * ((width * height * 3) // 256 + 1)
+        self.rgb = self.rgb[: width * height * 3]
+
+
+class _RealSct:
+    def __init__(self, width=8, height=4):
+        self.monitors = [{"union": True}, {"i": 0}]
+        self._w, self._h = width, height
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def grab(self, _mon):
+        return _RealShot(self._w, self._h)
+
+
+def test_half_res_halves_both_dimensions(monkeypatch):
+    # Measured payoff: input 2859 -> 868 tokens, total 9.24s -> 8.09s. Read
+    # back out of the PNG header rather than from the size we handed in.
+    monkeypatch.setattr(config, "SCREEN_HALF_RES", True)
+    monkeypatch.setattr(screen_mod.mss, "MSS", lambda: _RealSct(8, 4))
+    (png,) = screen_mod.grab()
+    assert _png_dimensions(png) == (4, 2)
+
+
+def test_full_res_when_the_flag_is_off(monkeypatch):
+    monkeypatch.setattr(config, "SCREEN_HALF_RES", False)
+    monkeypatch.setattr(screen_mod.mss, "MSS", lambda: _RealSct(8, 4))
+    (png,) = screen_mod.grab()
+    assert _png_dimensions(png) == (8, 4)
+
+
+def test_halving_keeps_the_pixels_aligned_not_just_the_size(monkeypatch):
+    # A wrong reshape or a non-contiguous buffer still produces a PNG of the
+    # right dimensions, full of garbage. Check actual pixel values: halving
+    # must keep every other pixel of every other row, in order.
+    width, height = 8, 4
+    shot = _RealShot(width, height)
+    data, size = screen_mod._halve(shot.rgb, width, height)
+    assert size == (4, 2)
+
+    rows = [shot.rgb[r * width * 3:(r + 1) * width * 3] for r in range(height)]
+    expected = b"".join(
+        b"".join(rows[r][c * 3:c * 3 + 3] for c in range(0, width, 2))
+        for r in range(0, height, 2)
+    )
+    assert data == expected
+
+
 def test_grab_returns_one_png_per_monitor(monkeypatch):
+    # About which monitors get grabbed, not about resolution - the half-res
+    # path has its own tests and needs a fake with real pixel data.
+    monkeypatch.setattr(config, "SCREEN_HALF_RES", False)
     sct = _FakeSct(count=2)
     monkeypatch.setattr(screen_mod.mss, "MSS", lambda: sct)
     monkeypatch.setattr(
@@ -639,6 +715,7 @@ def test_grab_returns_one_png_per_monitor(monkeypatch):
 
 
 def test_grab_on_a_single_monitor_returns_one_image(monkeypatch):
+    monkeypatch.setattr(config, "SCREEN_HALF_RES", False)
     sct = _FakeSct(count=1)
     monkeypatch.setattr(screen_mod.mss, "MSS", lambda: sct)
     monkeypatch.setattr(
@@ -1077,6 +1154,81 @@ def _live_overlay(monkeypatch):
     return ov
 
 
+def _spy_on_raising(ov):
+    """Record lift() and -topmost writes on a real Tk window."""
+    calls = []
+    real_lift, real_attr = ov.root.lift, ov.root.attributes
+
+    def lift(*a):
+        calls.append("lift")
+        return real_lift(*a)
+
+    def attributes(*a):
+        if len(a) >= 2 and a[0] == "-topmost":
+            calls.append(("topmost", a[1]))
+        return real_attr(*a)
+
+    ov.root.lift = lift
+    ov.root.attributes = attributes
+    return calls
+
+
+def test_showing_the_overlay_raises_it_not_just_its_alpha(monkeypatch):
+    # Alpha cannot change z-order, which is exactly why Ctrl+Alt+H could not
+    # bring the overlay back once another app buried it. Nothing can detect
+    # the burial either - Tk reports -topmost 1 and viewable True throughout -
+    # so raising has to be unconditional on the user's action.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        ov.toggle_visible()          # hide
+        ov.root.update()
+        calls = _spy_on_raising(ov)
+        ov.toggle_visible()          # show again
+        ov.root.update()
+
+        assert "lift" in calls, "showing the overlay never lifted it"
+        # off-then-on is what re-applies topmost on Windows; setting it to
+        # True when it is already True is a no-op.
+        assert ("topmost", False) in calls and ("topmost", True) in calls, (
+            f"topmost was not re-asserted: {calls}"
+        )
+        assert calls.index(("topmost", False)) < calls.index(("topmost", True))
+    finally:
+        ov.root.destroy()
+
+
+def test_a_new_answer_raises_the_overlay(monkeypatch):
+    # The other half of the recovery: if it is buried, pressing any answer
+    # hotkey should surface it along with the answer.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        calls = _spy_on_raising(ov)
+        ov.ui_queue.put(("clear", None))
+        ov._drain()
+        ov.root.update()
+        assert "lift" in calls, "a new answer did not raise the overlay"
+    finally:
+        ov.root.destroy()
+
+
+def test_raising_does_not_change_the_hwnd_or_the_alpha(monkeypatch):
+    # Display affinity lives on the HWND, and alpha is the hide state. A
+    # recovery that disturbed either would trade one bug for a worse one.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        hwnd = ov.root.winfo_id()
+        alpha = float(ov.root.attributes("-alpha"))
+        ov._raise()
+        ov.root.update()
+        assert ov.root.winfo_id() == hwnd
+        assert float(ov.root.attributes("-alpha")) == alpha
+    finally:
+        ov.root.destroy()
+
+
 def test_grip_resizes_without_moving_the_window(monkeypatch):
     # overrideredirect(True) removes the frame, so there is no resize border
     # and no window manager to do the work - hand-rolled like the drag.
@@ -1135,19 +1287,123 @@ def test_grip_will_not_shrink_the_window_into_uselessness(monkeypatch):
         ov.root.destroy()
 
 
-def test_dragging_the_body_still_moves_and_does_not_resize(monkeypatch):
-    # Regression: adding the grip must not turn a body drag into a resize.
+def test_the_drag_bar_moves_the_window(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
         ov.root.geometry("460x300+100+100")
         ov.root.update()
-        ov.text.event_generate("<Button-1>", rootx=150, rooty=150)
+        hwnd = ov.root.winfo_id()
+
+        ov._drag_bar.event_generate("<Button-1>", rootx=150, rooty=110)
         ov.root.update()
-        ov.text.event_generate("<B1-Motion>", rootx=210, rooty=190)
+        ov._drag_bar.event_generate("<B1-Motion>", rootx=210, rooty=150)
         ov.root.update()
 
         assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140)
         assert (ov.root.winfo_width(), ov.root.winfo_height()) == (460, 300)
+        assert ov.root.winfo_id() == hwnd
+    finally:
+        ov.root.destroy()
+
+
+def test_the_drag_bar_is_visible_along_the_top(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov.root.update()
+        bar = ov._drag_bar
+        assert bar.winfo_ismapped()
+        assert bar.winfo_rooty() == ov.root.winfo_y(), "bar is not at the top"
+        assert bar.winfo_width() > 400, "bar does not span the width"
+        # An empty Frame collapses to 1px unless propagation is off, which
+        # would leave a drag surface too thin to hit.
+        assert bar.winfo_height() >= 10, f"bar is {bar.winfo_height()}px tall"
+    finally:
+        ov.root.destroy()
+
+
+def test_dragging_the_body_selects_text_instead_of_moving_the_window(monkeypatch):
+    # The point of the drag bar. <Button-1> used to be bound on self.text AND
+    # on self.root, and bindtags run the toplevel binding for events on any
+    # child - so both had to go, or a drag across the text would still move
+    # the window instead of selecting.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov._write("- Redis, 5min TTL\n- Invalidate on write\n")
+        ov.root.update()
+
+        ov.text.event_generate("<Button-1>", x=20, y=10, rootx=150, rooty=150)
+        ov.root.update()
+        ov.text.event_generate("<B1-Motion>", x=200, y=10, rootx=310, rooty=190)
+        ov.root.update()
+
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (100, 100), (
+            "dragging across the text moved the window"
+        )
+        assert ov._drag_from is None, "the text still starts a window drag"
+    finally:
+        ov.root.destroy()
+
+
+def test_ctrl_c_copies_the_selection(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov._write("- Redis, 5min TTL\n")
+        ov.root.update()
+        ov.root.clipboard_clear()
+        ov.root.clipboard_append("STALE")
+        ov.text.tag_add("sel", "1.0", "1.7")
+        ov.root.update()
+
+        # Both delivery paths, because which one fires depends on whether a
+        # child holds Tk focus - and focus does not reliably land in a process
+        # that has created and destroyed many Tk roots, which is exactly what
+        # this suite does.
+        for target in (ov.text, ov.root):
+            ov.root.clipboard_clear()
+            ov.root.clipboard_append("STALE")
+            # focus_force, not focus_set: a key event generated for an
+            # unfocused widget is not delivered to it, and plain focus_set
+            # does not take in a process that has churned through many Tk
+            # roots. This still drives the real binding.
+            target.focus_force()
+            ov.root.update()
+            target.event_generate("<Control-c>")
+            ov.root.update()
+            assert ov.root.clipboard_get() == "- Redis", (
+                f"Ctrl+C on {target} left the clipboard at "
+                f"{ov.root.clipboard_get()!r}"
+            )
+    finally:
+        ov.root.destroy()
+
+
+def test_ctrl_c_with_nothing_selected_does_not_raise(monkeypatch):
+    # A disabled Text raises TclError for sel.first when there is no
+    # selection. Unhandled, that reaches Tk's report_callback_exception and
+    # only ever shows up on stderr.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov._write("- Redis\n")
+        ov.root.update()
+        ov.root.clipboard_clear()
+        ov.root.clipboard_append("UNTOUCHED")
+
+        # Asserting "the clipboard did not change" alone has no teeth: it is
+        # equally true when the binding raises, because Tk routes exceptions
+        # from a callback to report_callback_exception and prints to stderr
+        # rather than propagating. Watch that handler instead.
+        blew_up = []
+        ov.root.report_callback_exception = lambda *a: blew_up.append(a)
+
+        ov.text.focus_force()
+        ov.root.update()
+        ov.text.event_generate("<Control-c>")
+        ov.root.update()
+
+        assert not blew_up, f"the binding raised with no selection: {blew_up}"
+        assert ov.root.clipboard_get() == "UNTOUCHED"
     finally:
         ov.root.destroy()
 
@@ -1270,12 +1526,13 @@ def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
         hwnd_before = ov.root.winfo_id()
 
         # Drive the real handlers rather than setting geometry ourselves -
-        # otherwise this passes with no drag code at all.
-        ov.text.event_generate("<Button-1>", rootx=150, rooty=150)
+        # otherwise this passes with no drag code at all. Driven through the
+        # drag bar since the text body became selectable.
+        ov._drag_bar.event_generate("<Button-1>", rootx=150, rooty=150)
         ov.root.update()
         assert ov._drag_from == (50, 50), "grab did not record the offset"
 
-        ov.text.event_generate("<B1-Motion>", rootx=210, rooty=190)
+        ov._drag_bar.event_generate("<B1-Motion>", rootx=210, rooty=190)
         ov.root.update()
 
         assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140), (
@@ -1283,12 +1540,12 @@ def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
         )
         assert ov.root.winfo_id() == hwnd_before, "HWND changed - exclusion would drop"
 
-        ov.text.event_generate("<ButtonRelease-1>", rootx=210, rooty=190)
+        ov._drag_bar.event_generate("<ButtonRelease-1>", rootx=210, rooty=190)
         ov.root.update()
         assert ov._drag_from is None, "release did not clear the drag state"
 
         # A motion event with no grab must not move anything.
-        ov.text.event_generate("<B1-Motion>", rootx=400, rooty=400)
+        ov._drag_bar.event_generate("<B1-Motion>", rootx=400, rooty=400)
         ov.root.update()
         assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140)
     finally:

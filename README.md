@@ -33,10 +33,21 @@ Missing `ANTHROPIC_API_KEY` will fail immediately on startup with a clear error.
 | `Ctrl+Shift+Space` | Answer a typed question, using the transcript |
 | `Ctrl+Alt+Space` | Read the screen and answer what's on it, in code |
 | `Ctrl+Alt+H` | Hide or show the overlay |
-| drag the box | Move it — there is no titlebar to grab |
+| drag the top bar | Move it — the strip along the top, there is no titlebar |
 | drag the corner grip | Resize it — the small square, bottom right |
 | `Ctrl` + scroll wheel | Bigger or smaller text, 8pt to 32pt |
+| drag across the text | Select it. `Ctrl+C` copies |
 | `Ctrl+Alt+Q` | Quit |
+
+## If it disappears behind another window
+
+Press `Ctrl+Alt+H` twice, or any answer hotkey. Both re-raise it.
+
+Nothing can detect that it got buried — Tk reports the window as topmost and
+viewable the whole time another app covers it — so raising is something you
+trigger, never something the app notices. It is deliberately not on a timer: a
+window that reclaims the front every second fights every other topmost window
+on your desktop.
 
 ## Screen mode
 
@@ -49,9 +60,16 @@ It answers under a second system prompt that writes real code instead of the
 spoken cue cards `Ctrl+Space` produces. On a diagram or a dashboard it falls
 back to bullets on its own.
 
-Measured, one monitor at 1536x864: 140 ms to grab, 407 KB of PNG, about 7
-seconds to a finished answer, roughly $0.025 a press. Output tokens are most
-of that — code is much longer than four bullets.
+Screenshots go at half resolution (`SCREEN_HALF_RES`). Measured, one monitor at
+1536x864: input drops 2859 → 868 tokens, TTFT 2.37s → 2.03s, and a full answer
+came back in 4.3s against 9.2s at full resolution. Legibility was tested rather
+than assumed — at half resolution the model still transcribed a 14pt IDE-font
+stub correctly. Set it `False` if a real pad ever reads worse.
+
+Do not expect much more: **output dominates the wall clock.** A screen answer
+runs a few hundred tokens at roughly 50 tok/s, so most of the time is
+generation, not the image. The one large lever is `FAST_MODE`, and that needs
+an entitlement this account does not have.
 
 Monitors are sent as one image each, never stitched into one wide picture.
 Two 1920-wide screens stitched are 3840 across, and the API scales anything
@@ -73,6 +91,8 @@ Everything adjustable is in `assistant/config.py`.
 - Want lower latency at some CPU cost: lower `GATE_POLL_S`
 - Debugging the overlay: `EXCLUDE_FROM_CAPTURE = False`, because you cannot
   screenshot the overlay while exclusion is on
+- Screenshots reading badly: `SCREEN_HALF_RES = False` for full resolution, at
+  roughly 2000 more input tokens and about a second
 - Overlay too small or text too fine: drag the corner grip, or `Ctrl`+scroll.
   Neither persists across restarts — change `geometry(...)` and `_FONT` in
   `assistant/overlay.py` to move the defaults

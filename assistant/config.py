@@ -23,6 +23,17 @@ MAX_TURNS = 400
 # False to debug the overlay — with exclusion on you cannot screenshot it.
 EXCLUDE_FROM_CAPTURE = True
 
+# Send screenshots at half resolution. Measured on this machine, one 1536x864
+# monitor: TTFT 2.37s -> 2.03s, total 9.24s -> 8.09s, input 2859 -> 868 tokens
+# (about $0.010 a press). Legibility was tested rather than assumed — at half
+# resolution the model still transcribed a 14pt IDE-font stub correctly, one
+# hyphen aside. Set False if a real interview pad ever reads worse.
+#
+# Do not expect much more than this: output dominates the wall clock. Screen
+# answers run ~400 tokens at roughly 50 tok/s, so most of those 8 seconds is
+# generation, not the image.
+SCREEN_HALF_RES = True
+
 # Fast mode is a research preview and needs the org to be allowlisted for it.
 # Without that entitlement EVERY request 429s with "rate limit of 0 fast mode
 # input tokens per minute" - the app is unusable rather than merely slower, so
