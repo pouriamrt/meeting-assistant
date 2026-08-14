@@ -522,6 +522,14 @@ class Overlay:
                         self.toggle_visible()
                     elif kind == "quit":
                         self._alive = False
+                        if self._save_job is not None:
+                            # Cancel before destroying. A debounce timer still
+                            # queued when the window goes fires into a dead
+                            # interpreter, and Tk prints `invalid command name`
+                            # to stderr - alarming, and on the quit path the
+                            # last thing anyone should see.
+                            self.root.after_cancel(self._save_job)
+                            self._save_job = None
                         try:
                             # Before destroy(): _save_now reads the geometry
                             # off the live window, and a destroyed one has

@@ -14,6 +14,7 @@ import pytest
 import assistant.overlay as overlay_mod
 from assistant import uistate
 
+
 class _FakeEntry:
     """Stand-in for tk.Entry: records what the widget code does."""
 
@@ -42,6 +43,8 @@ class _FakeEntry:
 
     def destroy(self):
         self.destroyed = True
+
+
 class _FakeUiQueue:
     def __init__(self, items):
         self._items = list(items)
@@ -50,6 +53,8 @@ class _FakeUiQueue:
         if not self._items:
             raise queue.Empty
         return self._items.pop(0)
+
+
 def _bare_overlay():
     """Overlay.__new__ skips __init__ - no Tk window, no capture-exclusion
     syscall - so _drain's message handling can be unit tested in isolation."""
@@ -62,12 +67,16 @@ def _bare_overlay():
     # by hand. _open_query_entry reads this to size a lazily-created entry.
     ov._font_size = uistate.DEFAULT.font_size
     return ov
+
+
 def _font_size_of(widget) -> int:
     """Tk's cget("font") returns a font SPEC STRING ("{Segoe UI} 12"), not the
     tuple it was configured with, so indexing it walks characters."""
     import tkinter.font as tkfont
 
     return tkfont.Font(font=widget.cget("font")).cget("size")
+
+
 def test_prompt_message_opens_one_inline_entry_in_the_root(monkeypatch):
     monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
     ov = _bare_overlay()
@@ -87,6 +96,8 @@ def test_prompt_message_opens_one_inline_entry_in_the_root(monkeypatch):
     assert ov._entry.kwargs["bg"] == overlay_mod._BG
     assert ov._entry.kwargs["fg"] == overlay_mod._FG
     assert ov._entry.kwargs["borderwidth"] == 0
+
+
 def test_prompt_message_reuses_an_already_open_entry(monkeypatch):
     monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
     ov = _bare_overlay()
@@ -100,6 +111,8 @@ def test_prompt_message_reuses_an_already_open_entry(monkeypatch):
 
     assert ov._entry is first, "a second press must not stack a second entry"
     assert first.focused
+
+
 def test_entry_return_destroys_before_calling_back_with_the_typed_text(monkeypatch):
     monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
     ov = _bare_overlay()
@@ -114,6 +127,8 @@ def test_entry_return_destroys_before_calling_back_with_the_typed_text(monkeypat
     assert entry.destroyed, "must be destroyed before the callback runs"
     assert ov._entry is None
     assert received == ["how do you handle migrations"]
+
+
 def test_entry_return_with_empty_text_does_not_call_back(monkeypatch):
     monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
     ov = _bare_overlay()
@@ -128,6 +143,8 @@ def test_entry_return_with_empty_text_does_not_call_back(monkeypatch):
     assert entry.destroyed
     assert ov._entry is None
     assert called == []
+
+
 def test_entry_escape_destroys_without_calling_back(monkeypatch):
     monkeypatch.setattr(overlay_mod.tk, "Entry", _FakeEntry)
     ov = _bare_overlay()
@@ -142,6 +159,8 @@ def test_entry_escape_destroys_without_calling_back(monkeypatch):
     assert entry.destroyed
     assert ov._entry is None
     assert called == []
+
+
 def test_entry_return_with_a_raising_callback_logs_and_does_not_propagate(
     monkeypatch, caplog
 ):
@@ -165,6 +184,8 @@ def test_entry_return_with_a_raising_callback_logs_and_does_not_propagate(
     assert entry.destroyed
     assert ov._entry is None
     assert caplog.records, "the failure was swallowed without a log"
+
+
 def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
     # Regression. The entry was packed after a widget with expand=True and
     # fill="both", which claims the entire cavity - pack() succeeded, the
@@ -195,6 +216,8 @@ def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
         assert entry.winfo_toplevel() is ov.root
     finally:
         ov.root.destroy()
+
+
 def _live_overlay(monkeypatch):
     """A real Overlay with capture exclusion off, or skip if there is no display."""
     import queue as _queue
@@ -207,6 +230,8 @@ def _live_overlay(monkeypatch):
     ov = _tk_root_or_skip(lambda: Overlay(_queue.Queue()))
     ov.root.attributes("-alpha", 0.0)
     return ov
+
+
 def _tk_root_or_skip(build):
     """Build a Tk-owning object, retrying once, or skip if Tk is really absent.
 
@@ -242,6 +267,8 @@ def _tk_root_or_skip(build):
             return build()
         except _tk.TclError as again:
             pytest.skip(f"tk unavailable twice: {again}")
+
+
 def _spy_on_raising(ov):
     """Record lift() and -topmost writes on a real Tk window."""
     calls = []
@@ -259,6 +286,8 @@ def _spy_on_raising(ov):
     ov.root.lift = lift
     ov.root.attributes = attributes
     return calls
+
+
 def test_showing_the_overlay_raises_it_not_just_its_alpha(monkeypatch):
     # Alpha cannot change z-order, which is exactly why Ctrl+Alt+H could not
     # bring the overlay back once another app buried it. Nothing can detect
@@ -282,6 +311,8 @@ def test_showing_the_overlay_raises_it_not_just_its_alpha(monkeypatch):
         assert calls.index(("topmost", False)) < calls.index(("topmost", True))
     finally:
         ov.root.destroy()
+
+
 def test_a_new_answer_raises_the_overlay(monkeypatch):
     # The other half of the recovery: if it is buried, pressing any answer
     # hotkey should surface it along with the answer.
@@ -295,6 +326,8 @@ def test_a_new_answer_raises_the_overlay(monkeypatch):
         assert "lift" in calls, "a new answer did not raise the overlay"
     finally:
         ov.root.destroy()
+
+
 def test_raising_does_not_change_the_hwnd_or_the_alpha(monkeypatch):
     # Display affinity lives on the HWND, and alpha is the hide state. A
     # recovery that disturbed either would trade one bug for a worse one.
@@ -309,6 +342,8 @@ def test_raising_does_not_change_the_hwnd_or_the_alpha(monkeypatch):
         assert float(ov.root.attributes("-alpha")) == alpha
     finally:
         ov.root.destroy()
+
+
 def test_grip_resizes_without_moving_the_window(monkeypatch):
     # overrideredirect(True) removes the frame, so there is no resize border
     # and no window manager to do the work - hand-rolled like the drag.
@@ -331,6 +366,8 @@ def test_grip_resizes_without_moving_the_window(monkeypatch):
         assert ov.root.winfo_id() == hwnd_before, "HWND changed - exclusion would drop"
     finally:
         ov.root.destroy()
+
+
 def test_grip_drag_does_not_also_move_the_window(monkeypatch):
     # Tk runs bindtags widget -> class -> TOPLEVEL -> all, and <Button-1> is
     # already bound on self.root for dragging. Without "break" on the grip
@@ -345,6 +382,8 @@ def test_grip_drag_does_not_also_move_the_window(monkeypatch):
         assert ov._drag_from is None, "the grip click reached the drag handler"
     finally:
         ov.root.destroy()
+
+
 def test_grip_will_not_shrink_the_window_into_uselessness(monkeypatch):
     # Past the floor the text is unreadable and the grip itself gets hard to
     # hit, which would leave no way to grow it back.
@@ -361,6 +400,8 @@ def test_grip_will_not_shrink_the_window_into_uselessness(monkeypatch):
         assert ov.root.winfo_height() >= overlay_mod._MIN_H
     finally:
         ov.root.destroy()
+
+
 def test_the_drag_bar_moves_the_window(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -378,6 +419,8 @@ def test_the_drag_bar_moves_the_window(monkeypatch):
         assert ov.root.winfo_id() == hwnd
     finally:
         ov.root.destroy()
+
+
 def test_the_drag_bar_is_visible_along_the_top(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -392,6 +435,8 @@ def test_the_drag_bar_is_visible_along_the_top(monkeypatch):
         assert bar.winfo_height() >= 10, f"bar is {bar.winfo_height()}px tall"
     finally:
         ov.root.destroy()
+
+
 def test_dragging_the_body_selects_text_instead_of_moving_the_window(monkeypatch):
     # The point of the drag bar. <Button-1> used to be bound on self.text AND
     # on self.root, and bindtags run the toplevel binding for events on any
@@ -414,6 +459,8 @@ def test_dragging_the_body_selects_text_instead_of_moving_the_window(monkeypatch
         assert ov._drag_from is None, "the text still starts a window drag"
     finally:
         ov.root.destroy()
+
+
 def test_ctrl_c_copies_the_selection(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -445,6 +492,8 @@ def test_ctrl_c_copies_the_selection(monkeypatch):
             )
     finally:
         ov.root.destroy()
+
+
 def test_ctrl_c_with_nothing_selected_does_not_raise(monkeypatch):
     # A disabled Text raises TclError for sel.first when there is no
     # selection. Unhandled, that reaches Tk's report_callback_exception and
@@ -472,6 +521,8 @@ def test_ctrl_c_with_nothing_selected_does_not_raise(monkeypatch):
         assert ov.root.clipboard_get() == "UNTOUCHED"
     finally:
         ov.root.destroy()
+
+
 def test_ctrl_wheel_scales_the_font_both_ways(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -495,6 +546,8 @@ def test_ctrl_wheel_scales_the_font_both_ways(monkeypatch):
         assert _font_size_of(ov.text) == start
     finally:
         ov.root.destroy()
+
+
 def test_font_size_is_clamped_at_both_ends(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -510,6 +563,8 @@ def test_font_size_is_clamped_at_both_ends(monkeypatch):
         assert ov._font_size == overlay_mod._FONT_MIN
     finally:
         ov.root.destroy()
+
+
 def test_a_query_entry_opened_after_scaling_uses_the_current_size(monkeypatch):
     # The entry is created lazily and read `font=_FONT`, the module constant.
     # Left alone it would open at 12pt beside 20pt body text.
@@ -529,6 +584,8 @@ def test_a_query_entry_opened_after_scaling_uses_the_current_size(monkeypatch):
         )
     finally:
         ov.root.destroy()
+
+
 def test_an_already_open_query_entry_scales_too(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -543,10 +600,14 @@ def test_an_already_open_query_entry_scales_too(monkeypatch):
         assert _font_size_of(ov.text) == ov._font_size
     finally:
         ov.root.destroy()
+
+
 @pytest.mark.parametrize(
     "sequence, delta",
     [("<Control-MouseWheel>", 120), ("<Shift-MouseWheel>", -120)],
 )
+
+
 def test_wheel_gestures_keep_the_hwnd(monkeypatch, sequence, delta):
     # Display affinity lives on the HWND, so any gesture that rebuilt the
     # window - the obvious wrong way to implement hiding, and a plausible
@@ -561,6 +622,8 @@ def test_wheel_gestures_keep_the_hwnd(monkeypatch, sequence, delta):
         assert ov.root.winfo_id() == before, "HWND changed - exclusion would drop"
     finally:
         ov.root.destroy()
+
+
 def test_shift_wheel_changes_the_opacity_both_ways(monkeypatch):
     ov = _live_overlay(monkeypatch)
     try:
@@ -588,6 +651,8 @@ def test_shift_wheel_changes_the_opacity_both_ways(monkeypatch):
         assert float(ov.root.attributes("-alpha")) == pytest.approx(start)
     finally:
         ov.root.destroy()
+
+
 def test_opacity_is_clamped_at_both_ends(monkeypatch):
     # The floor is the load-bearing half. An overrideredirect window at alpha 0
     # has no titlebar to find and no frame to click, so an unclamped fade is a
@@ -607,6 +672,8 @@ def test_opacity_is_clamped_at_both_ends(monkeypatch):
         assert ov._alpha == pytest.approx(overlay_mod._ALPHA_MAX)
     finally:
         ov.root.destroy()
+
+
 def test_hiding_and_showing_preserves_the_chosen_opacity(monkeypatch):
     # toggle_visible drives the same -alpha the user is now setting. Restoring
     # a hard-coded 1.0 on show would silently throw the setting away.
@@ -631,6 +698,8 @@ def test_hiding_and_showing_preserves_the_chosen_opacity(monkeypatch):
         )
     finally:
         ov.root.destroy()
+
+
 def test_fading_while_hidden_does_not_reveal_the_overlay(monkeypatch):
     # Ctrl+Alt+H hides it; a stray Shift+wheel must not paint it back onto a
     # screen share. The setting is stored, the window stays clear.
@@ -648,6 +717,8 @@ def test_fading_while_hidden_does_not_reveal_the_overlay(monkeypatch):
         assert ov._alpha < 1.0, "the adjustment was dropped instead of stored"
     finally:
         ov.root.destroy()
+
+
 def test_shift_wheel_does_not_also_scroll_the_text(monkeypatch):
     # Shift+wheel is horizontal scroll on a Text by default. Without "break"
     # the view slides sideways every time the opacity is nudged.
@@ -665,6 +736,8 @@ def test_shift_wheel_does_not_also_scroll_the_text(monkeypatch):
         assert ov.text.xview() == before, f"the text scrolled sideways: {before}"
     finally:
         ov.root.destroy()
+
+
 def test_monitor_rects_are_converted_out_of_physical_pixels():
     # mss reports physical pixels, Tk here is DPI-unaware and positions windows
     # in scaled ones. Measured on this machine: a 1920-wide screen at 125% is
@@ -675,6 +748,8 @@ def test_monitor_rects_are_converted_out_of_physical_pixels():
     assert overlay_mod._scale_rect((-1920, 0, 1920, 1080), 0.8) == (-1536, 0, 1536, 864)
     # No scaling is a no-op, not a rounding drift.
     assert overlay_mod._scale_rect((0, 0, 2560, 1440), 1.0) == (0, 0, 2560, 1440)
+
+
 def test_scale_comes_from_the_primary_not_from_monitors_index_one(monkeypatch):
     # monitors[1] is just first in EnumDisplayMonitors order, which is not
     # always the primary. Taking the scale from the wrong monitor yields 1.0 on
@@ -750,6 +825,8 @@ def test_the_clamp_uses_the_same_units_tk_positions_windows_in(monkeypatch):
         )
     finally:
         ov.root.destroy()
+
+
 def test_a_saved_state_is_applied_on_startup(monkeypatch):
     # The whole point of the feature: what you set last time is what you get.
     uistate.save(uistate.UiState(w=612, h=388, x=140, y=96, font_size=19, alpha=0.55))
@@ -764,6 +841,8 @@ def test_a_saved_state_is_applied_on_startup(monkeypatch):
         assert (ov.root.winfo_x(), ov.root.winfo_y()) == (140, 96)
     finally:
         ov.root.destroy()
+
+
 def test_a_hostile_saved_state_cannot_produce_an_unusable_window(monkeypatch):
     # The file is the back door around every live clamp. Zero alpha and an
     # off-screen origin are each enough to make the overlay unrecoverable.
@@ -782,6 +861,8 @@ def test_a_hostile_saved_state_cannot_produce_an_unusable_window(monkeypatch):
         assert ov.root.winfo_x() < ov.root.winfo_screenwidth(), "restored off-screen"
     finally:
         ov.root.destroy()
+
+
 def test_quitting_writes_the_current_geometry(monkeypatch):
     # The debounce timer needs a running mainloop, so quit has to flush. It
     # also has to do so BEFORE destroy(), which is what makes this worth a
@@ -805,6 +886,8 @@ def test_quitting_writes_the_current_geometry(monkeypatch):
     assert (saved.w, saved.h) == (533, 341), f"geometry not saved: {saved}"
     assert (saved.x, saved.y) == (77, 88)
     assert saved.font_size == expected_font
+
+
 def test_a_wheel_change_schedules_exactly_one_save(monkeypatch):
     # Debounced, not per event. A spun wheel is a burst; writing the file on
     # every notch would be hundreds of writes to change one number.
@@ -828,6 +911,8 @@ def test_a_wheel_change_schedules_exactly_one_save(monkeypatch):
         )
     finally:
         ov.root.destroy()
+
+
 def test_a_failing_save_still_lets_the_app_quit(monkeypatch):
     # Asserting "nothing blew up" proved nothing: _drain catches everything, so
     # that held even on code that never quits. What matters is that the window
@@ -905,3 +990,27 @@ def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
         assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140)
     finally:
         ov.root.destroy()
+
+
+def test_quit_cancels_a_pending_save_timer(monkeypatch):
+    # A debounce timer still queued when the window is destroyed fires into a
+    # dead interpreter, and Tk prints `invalid command name` to stderr. Seen
+    # for real while exercising the launch/quit cycle by hand.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        pending = ov._save_job
+        assert pending is not None, "nothing was scheduled, so nothing is proven"
+
+        ov.ui_queue.put(("quit", None))
+        ov._drain()
+
+        assert ov._save_job is None, "the save timer outlived the window"
+        assert pending not in set(ov.root.tk.call("after", "info"))
+    finally:
+        try:
+            ov.root.destroy()
+        except tk.TclError:
+            pass

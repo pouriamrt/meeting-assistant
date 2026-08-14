@@ -256,3 +256,26 @@ def test_clamping_twice_changes_nothing_more(state, desktop):
     # clamped value must be a no-op, or a value would drift every restart.
     once = state.clamped(desktop)
     assert once.clamped(desktop) == once
+
+
+def test_a_missing_file_is_not_logged_as_a_problem(tmp_path, monkeypatch, caplog):
+    # The first launch on any machine has no file. Logging that at warning with
+    # a full traceback makes a normal first run look like a crash.
+    monkeypatch.setattr(uistate, "_state_path", lambda: tmp_path / "absent.json")
+    with caplog.at_level("DEBUG"):
+        assert uistate.load() == uistate.DEFAULT
+    assert not [r for r in caplog.records if r.levelname == "WARNING"], (
+        f"first run logged a warning: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_an_unusable_file_still_is_logged(tmp_path, monkeypatch, caplog):
+    # The other half: silence for absent must not become silence for corrupt.
+    path = tmp_path / "ui.json"
+    path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(uistate, "_state_path", lambda: path)
+    with caplog.at_level("DEBUG"):
+        assert uistate.load() == uistate.DEFAULT
+    assert [r for r in caplog.records if r.levelname == "WARNING"], (
+        "a corrupt file was discarded with no log at all"
+    )

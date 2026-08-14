@@ -112,8 +112,11 @@ def load() -> UiState:
     a remembered window size could not be parsed would be a far worse failure
     than forgetting it.
     """
+    path = _state_path()
+    if not path.exists():
+        return DEFAULT          # first run, not a problem worth a traceback
     try:
-        raw = json.loads(_state_path().read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
         state = UiState(
             w=int(raw["w"]),
             h=int(raw["h"]),
