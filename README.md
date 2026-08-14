@@ -5,11 +5,11 @@
 **Hears both sides of a call, transcribes it locally with whisper,
 and answers into a window that screen capture cannot see.**
 
-![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Windows 10 build 19041+](https://img.shields.io/badge/windows-build%2019041+-0078D4?style=for-the-badge&logo=windows&logoColor=white)
-![Local whisper](https://img.shields.io/badge/transcription-on--device-5A5A5A?style=for-the-badge)
-![No GPU](https://img.shields.io/badge/GPU-not%20required-6E6E6E?style=for-the-badge)
-![96 tests](https://img.shields.io/badge/tests-96%20passing-2E7D32?style=for-the-badge)
+![Transcription on-device](https://img.shields.io/badge/transcription-on--device-2f6a8d?style=flat-square&labelColor=101014)
+![GPU not required](https://img.shields.io/badge/GPU-not%20required-6f61a3?style=flat-square&labelColor=101014)
+![Python 3.13+](https://img.shields.io/badge/python-3.13+-2a2a32?style=flat-square&labelColor=101014&logo=python&logoColor=white)
+![Windows build 19041+](https://img.shields.io/badge/windows-build%2019041+-2a2a32?style=flat-square&labelColor=101014&logo=windows&logoColor=white)
+![96 tests](https://img.shields.io/badge/tests-96%20passing-2a2a32?style=flat-square&labelColor=101014)
 
 <img src="docs/overlay.png" alt="The overlay showing a cue card over a dark background" width="560">
 
@@ -35,6 +35,14 @@ Screen capture normally cannot see this window at all.</sub>
 The audio never leaves the machine. It is captured, buffered, and transcribed
 on the local CPU, and only the resulting text goes to the API, plus a
 screenshot when you ask for one.
+
+| | |
+|:---|:---|
+| **Hears** | Your microphone and the system output, as two separate streams |
+| **Transcribes** | `faster-whisper base.en`, locally, on 4 CPU threads |
+| **Answers** | `claude-opus-5`, streamed token by token |
+| **Shows** | A borderless overlay that `WDA_EXCLUDEFROMCAPTURE` keeps out of screen shares |
+| **Costs** | About $0.010 per screen-mode press |
 
 ## Requirements
 
@@ -153,10 +161,18 @@ It answers under a second system prompt that writes real code instead of the
 spoken cue cards <kbd>Ctrl</kbd>+<kbd>Space</kbd> produces. On a diagram or a dashboard it falls
 back to bullets on its own.
 
-Monitors are sent as one image each, never stitched into one wide picture. Two
-1920-wide screens stitched are 3840 across, and the API scales anything past
+Monitors are sent as one image each, never stitched into one wide picture.
+
+<details>
+<summary>Why stitching breaks it</summary>
+
+<br>
+
+Two 1920-wide screens stitched are 3840 across, and the API scales anything past
 1568 on the long edge, which lands the pair at 441px tall. That is too short to
 read code off. Separate images each get their own scaling budget.
+
+</details>
 
 ### Half resolution saves money, not time
 
@@ -189,22 +205,36 @@ A borderless always-on-top window, 460x300 at startup, hidden from screen
 capture by `SetWindowDisplayAffinity`. It refuses to start if that call fails
 rather than showing itself unprotected.
 
+<details>
+<summary>Why the handle decides everything else</summary>
+
+<br>
+
 Display affinity lives on the window handle, which shapes the rest of the
 design. Hiding uses alpha rather than unmapping, because remapping can hand back
 a different handle and silently drop the exclusion. The typed-query box is
 packed inline rather than opened as a dialog, because a second window would be a
 second handle and would not inherit the exclusion.
 
+</details>
+
 > [!TIP]
 > **If it disappears behind another window**, press
 > <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> twice, or any answer hotkey. Both
 > re-raise it.
+
+<details>
+<summary>Why raising is manual and not on a timer</summary>
+
+<br>
 
 Nothing can detect that it got buried, since Tk reports the window as topmost
 and viewable the whole time another app covers it, so raising is something you
 trigger rather than something the app notices. It is deliberately not on a
 timer: a window that reclaims the front every second fights every other topmost
 window on your desktop.
+
+</details>
 
 The overlay never appears in its own screenshots either. `WDA_EXCLUDEFROMCAPTURE`
 covers that capture path too, so the model cannot read its own last answer back.
@@ -233,12 +263,19 @@ Everything adjustable is in `assistant/config.py`.
 Reach for `SILENCE_END_MS` first if it keeps interrupting you. At 700ms a
 natural pause mid-question splits one question into two turns.
 
+<details>
+<summary>Two knobs with a catch</summary>
+
+<br>
+
 `FAST_MODE` is off by default because without the entitlement every request
 fails with `rate limit of 0 fast mode input tokens per minute`. That is
 unusable, not merely slower.
 
 Overlay size and font do not persist across restarts. Change `geometry(...)` and
 `_FONT_SIZE` in `assistant/overlay.py` to move the defaults.
+
+</details>
 
 ## Tests
 
@@ -249,11 +286,20 @@ uv run ruff check .
 
 The overlay tests drive a real Tk window rather than a mock: the drag and
 resize gestures, the wheel bindings, selection and clipboard, and the raise
-path. They run with `EXCLUDE_FROM_CAPTURE` turned off, because an excluded
-window cannot be screenshotted and therefore cannot be checked by a test.
-Exclusion itself is verified by hand instead, by sampling the pixel under the
-overlay with the flag on and again with it off. `docs/verification-checklist.md`
-lists which checks are scripted and which still need a person.
+path.
+
+<details>
+<summary>The one thing tests cannot cover</summary>
+
+<br>
+
+They run with `EXCLUDE_FROM_CAPTURE` turned off, because an excluded window
+cannot be screenshotted and therefore cannot be checked by a test. Exclusion
+itself is verified by hand instead, by sampling the pixel under the overlay with
+the flag on and again with it off. `docs/verification-checklist.md` lists which
+checks are scripted and which still need a person.
+
+</details>
 
 Tests that pin a property rather than a return value are checked by breaking the
 property on purpose and confirming the test goes red. That discipline caught
