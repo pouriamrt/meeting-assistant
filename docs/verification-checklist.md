@@ -135,6 +135,13 @@ passes, with the entry open too.
 `Win+Shift+S` and modern share tools use Windows Graphics Capture, a **different API**.
 Nothing scripted here touches it. This is the security check; it stays manual.
 
+**Confirmed by hand on 2026-08-14, Windows 11 build 26200: the overlay is absent from
+a `Win+Shift+S` capture.** Snipping Tool goes through Windows Graphics Capture, the
+same API family Teams and Zoom screen-share use, so this is the strongest evidence
+short of a live call. Re-run it after any change to `overlay.py`'s window creation or
+to `EXCLUDE_FROM_CAPTURE` — display affinity lives on the HWND and a new HWND does not
+inherit it.
+
 With the overlay from step 4 still running, press `Win+Shift+S` and drag a selection
 over the overlay region.
 
