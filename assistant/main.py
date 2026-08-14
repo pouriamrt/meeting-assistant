@@ -1,5 +1,6 @@
 """Wiring: capture, gates, hotkeys, overlay."""
 
+import hashlib
 import logging
 import queue
 import threading
@@ -164,6 +165,16 @@ def _install_hotkeys(
         if not images:
             status("no monitor to capture")
             return
+        # A digest per press, so "it answered the previous question" is
+        # answerable from the log instead of by guesswork: two presses with
+        # the same digest captured identical pixels, and the screen never
+        # changed under the grab. Different digests move the search to the
+        # request. ~1ms on 400KB.
+        digest = hashlib.sha256(b"".join(images)).hexdigest()[:12]
+        log.info(
+            "screen: %d monitor(s), %d KB, sha=%s",
+            len(images), sum(len(i) for i in images) // 1024, digest,
+        )
         start_answer(prompts.screen_tail(), images, prompts.CODE_SYSTEM)
 
     def on_toggle() -> None:

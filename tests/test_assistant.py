@@ -757,6 +757,58 @@ def test_answer_gate_lets_puts_through_before_any_later_press():
     assert fake.items == [("token", "a"), ("token", "b")]
 
 
+def test_screen_press_logs_a_digest_of_what_it_captured(monkeypatch, caplog):
+    # Reported as "it still answers the previous question". Fresh grabs and
+    # the real callback path both check out, so the log has to be able to
+    # settle it: same digest across two presses means the pixels never
+    # changed, different digests move the search to the request.
+    import assistant.screen as screen_mod
+
+    # Shaped like the real failure rather than like a convenient fixture:
+    # two monitors, the FIRST byte-identical across presses, and the change
+    # confined to the END of the SECOND. That kills three ways of getting the
+    # digest wrong at once - a constant, a prefix-only hash, and hashing only
+    # monitors[0] - each of which would report "same pixels" for two
+    # genuinely different screens, which is the one thing this log exists to
+    # rule out.
+    unchanged = b"\x89PNG" + b"identical" * 400
+    grabs = [
+        [unchanged, b"\x89PNG" + b"second" * 400 + b"QUESTION-ONE"],
+        [unchanged, b"\x89PNG" + b"second" * 400 + b"QUESTION-TWO"],
+    ]
+    monkeypatch.setattr(screen_mod, "grab", lambda: grabs.pop(0))
+    monkeypatch.setattr(main_mod.answer, "stream_answer", lambda *a, **k: None)
+
+    class _Hotkeys:
+        captured: dict = {}
+
+        def __init__(self, mapping):
+            _Hotkeys.captured = mapping
+
+        def start(self):
+            pass
+
+    from pynput import keyboard as kb
+
+    monkeypatch.setattr(kb, "GlobalHotKeys", _Hotkeys)
+    main_mod._install_hotkeys(
+        object(), Transcript(max_turns=10), _FakeQueue(), main_mod._AnswerGate()
+    )
+
+    with caplog.at_level(logging.INFO):
+        _Hotkeys.captured["<ctrl>+<alt>+<space>"]()
+        _Hotkeys.captured["<ctrl>+<alt>+<space>"]()
+
+    lines = [m for m in (r.getMessage() for r in caplog.records) if "screen:" in m]
+    assert len(lines) == 2, f"expected one log per press, got {lines}"
+    assert all("2 monitor(s)" in m for m in lines)
+    digests = [m.split("sha=")[1] for m in lines]
+    assert digests[0] != digests[1], (
+        "two different screens logged the same digest - the log cannot "
+        "distinguish a stale capture from a fresh one, which is its whole job"
+    )
+
+
 def test_guarded_hotkey_survives_a_raising_callback(caplog):
     # pynput kills its entire listener thread on an uncaught callback
     # exception - every hotkey dead at once, silently, app still running.
