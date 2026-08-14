@@ -345,3 +345,12 @@ build this than to you.
 
 Personal use. Pointing this at work calls reopens the consent and
 recording-policy question, which is a separate decision.
+
+Recording both sides of a conversation is not legal everywhere on one
+participant's consent, and a window the other side cannot see is normally
+against the rules of whoever is running an interview or a proctored exam,
+whatever the law says where you are. Both are worth deciding on purpose.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Provided as is, with no warranty.
