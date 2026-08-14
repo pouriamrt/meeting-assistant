@@ -380,3 +380,40 @@ def _speech(n):
 
 def _silence(n):
     return np.zeros(n, dtype=np.float32)
+
+
+def test_a_cached_model_is_loaded_without_touching_the_network(monkeypatch):
+    # Every launch otherwise does a HuggingFace revision check, which costs
+    # 2.8s instead of 0.5s when that host is unreachable - a locked-down
+    # machine belonging to whoever this was handed to.
+    import assistant.transcribe as tm
+
+    seen = {}
+
+    class FakeModel:
+        def __init__(self, name, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(tm, "WhisperModel", FakeModel)
+    monkeypatch.setattr(tm, "_model", None)
+    monkeypatch.setattr(tm, "model_is_cached", lambda: True)
+    tm._get_model()
+    assert seen.get("local_files_only") is True, "a cached model still hit the network"
+
+
+def test_a_missing_model_is_allowed_to_download(monkeypatch):
+    # The other half: local_files_only must not be hardcoded, or a first run
+    # can never fetch the model at all.
+    import assistant.transcribe as tm
+
+    seen = {}
+
+    class FakeModel:
+        def __init__(self, name, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(tm, "WhisperModel", FakeModel)
+    monkeypatch.setattr(tm, "_model", None)
+    monkeypatch.setattr(tm, "model_is_cached", lambda: False)
+    tm._get_model()
+    assert seen.get("local_files_only") is False, "first run could never download"

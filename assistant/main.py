@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import anthropic
 
-from . import answer, apikey, config, prompts, screen
+from . import answer, apikey, config, prompts, screen, single_instance
 from .capture import Capture
 from .overlay import Overlay
 from .transcribe import Transcript, gate_loop, warm_model
@@ -200,10 +200,37 @@ def _install_hotkeys(
     return hotkeys
 
 
+def _say_already_running() -> None:
+    """Otherwise a double-click appears to do nothing at all."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(
+            "Meeting assistant",
+            "It is already running.\n\n"
+            "Look for the overlay, or press Ctrl+Alt+H twice "
+            "to bring it back.",
+        )
+        root.destroy()
+    except Exception:
+        log.info("no display for the already-running notice", exc_info=True)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+
+    # Before anything opens an audio device. A second copy is silent about
+    # itself: it just halves the CPU available to each, so transcription falls
+    # behind and answers take longer, with nothing visibly broken.
+    if not single_instance.acquire():
+        log.warning("already running; this copy is exiting")
+        _say_already_running()
+        return
 
     # Environment, then the stored key, then a setup window. Before
     # anything else starts, so a missing key costs nothing but a prompt.

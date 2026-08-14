@@ -86,11 +86,16 @@ def speech_spans(audio: np.ndarray) -> list[dict]:
 def _get_model() -> WhisperModel:
     global _model
     if _model is None:
+        # local_files_only once it is cached, so a launch makes no network
+        # call at all. Otherwise every start does a HuggingFace revision check:
+        # 0.5s here, but 2.8s when that host is unreachable, which is exactly
+        # the case on a locked-down machine someone else is running this on.
         _model = WhisperModel(
             config.WHISPER_MODEL,
             device="cpu",
             compute_type="int8",
             cpu_threads=config.WHISPER_THREADS,
+            local_files_only=model_is_cached(),
         )
     return _model
 

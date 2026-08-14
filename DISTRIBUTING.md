@@ -59,6 +59,13 @@ Anthropic, plus a screenshot when you press `Ctrl+Alt+Space`.
 Screen capture and screen sharing, yes. A capture card, a phone camera pointed
 at the monitor, or somebody sitting next to you, no.
 
+## If it feels slow
+
+Check you are not running two copies. Launching it twice used to give you two,
+each capturing the same audio and each running speech recognition on it, which
+halves the speed of both without looking broken. It now refuses the second copy
+and says so.
+
 ## When something breaks
 
 `%LOCALAPPDATA%\meeting-assistant\assistant.log` has the details. Your key is

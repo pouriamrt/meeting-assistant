@@ -624,3 +624,28 @@ def test_screen_press_logs_a_digest_of_what_it_captured(monkeypatch, caplog):
         "two different screens logged the same digest - the log cannot "
         "distinguish a stale capture from a fresh one, which is its whole job"
     )
+
+
+def test_a_second_instance_is_refused():
+    # Two copies both capture the same audio and both run whisper on it, which
+    # is invisible except as everything being slower. Easy to hit by accident
+    # with an exe, where there is no terminal showing one already running.
+    from assistant import single_instance
+
+    try:
+        assert single_instance.acquire() is True, "the first copy was refused"
+        assert single_instance.acquire() is False, "a second copy was allowed"
+    finally:
+        single_instance.release()
+
+
+def test_the_claim_is_dropped_on_release():
+    # Otherwise a clean exit still blocks the next launch until reboot.
+    from assistant import single_instance
+
+    assert single_instance.acquire() is True
+    single_instance.release()
+    try:
+        assert single_instance.acquire() is True, "the name stayed claimed after release"
+    finally:
+        single_instance.release()
