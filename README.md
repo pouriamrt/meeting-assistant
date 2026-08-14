@@ -103,7 +103,6 @@ The rest work on the overlay itself, under the mouse.
 ```mermaid
 flowchart TB
     subgraph local["Stays on this machine"]
-        direction TB
         MIC["Microphone<br/>WASAPI"] --> RING["Ring buffer<br/>30s, 16 kHz mono"]
         SYS["System output<br/>WASAPI loopback"] --> RING
         RING --> GATE["Silence gate<br/>700ms trailing"]
