@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import anthropic
 
-from . import answer, config, prompts, screen
+from . import answer, apikey, config, prompts, screen
 from .capture import Capture
 from .overlay import Overlay
 from .transcribe import Transcript, gate_loop, warm_model
@@ -205,7 +205,9 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
 
-    client = anthropic.Anthropic(api_key=config.api_key())
+    # Environment, then the stored key, then a setup window. Before
+    # anything else starts, so a missing key costs nothing but a prompt.
+    client = anthropic.Anthropic(api_key=apikey.resolve())
     transcript = Transcript(config.MAX_TURNS)
     ui_queue: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -213,7 +215,12 @@ def main() -> None:
 
     # Off the critical path: the first decode would otherwise pay ~1s of
     # model construction on top of its own latency.
-    threading.Thread(target=warm_model, daemon=True, name="warm").start()
+    threading.Thread(
+        target=warm_model,
+        args=(lambda text: ui_queue.put(("status", text)),),
+        daemon=True,
+        name="warm",
+    ).start()
 
     capture = Capture()
     capture.start()

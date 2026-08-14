@@ -9,7 +9,7 @@ and answers into a window that screen capture cannot see.**
 ![GPU not required](https://img.shields.io/badge/GPU-not%20required-6f61a3?style=flat-square&labelColor=101014)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13+-2a2a32?style=flat-square&labelColor=101014&logo=python&logoColor=white)
 ![Windows build 19041+](https://img.shields.io/badge/windows-build%2019041+-2a2a32?style=flat-square&labelColor=101014&logo=windows&logoColor=white)
-![122 tests](https://img.shields.io/badge/tests-122%20passing-2a2a32?style=flat-square&labelColor=101014)
+![148 tests](https://img.shields.io/badge/tests-148%20passing-2a2a32?style=flat-square&labelColor=101014)
 
 <img src="docs/overlay.png" alt="The overlay showing a cue card over a dark background" width="560">
 
@@ -289,7 +289,7 @@ the overlay has no titlebar to recover it by.
 ## Tests
 
 ```bash
-uv run pytest -q          # 122 tests, about 4 seconds
+uv run pytest -q          # 148 tests, about 5 seconds
 uv run ruff check .
 ```
 
@@ -314,6 +314,32 @@ Tests that pin a property rather than a return value are checked by breaking the
 property on purpose and confirming the test goes red. That discipline caught
 four tests here that passed against deliberately broken code, so a green run is
 not taken as evidence on its own.
+
+## Building an exe for someone else
+
+```powershell
+.uild.ps1        # dist\meeting-assistant.zip, about 100 MB
+```
+
+A folder build, not one file: a one-file exe unpacks ~250MB to `%TEMP%` on
+every launch and is the main antivirus false-positive trigger. Unsigned either
+way, so SmartScreen warns once on a new machine.
+
+The recipient supplies their own Anthropic key, asked for once at first launch
+and stored via Windows DPAPI in `%LOCALAPPDATA%\meeting-assistant\key.bin`,
+encrypted against their Windows account. `ANTHROPIC_API_KEY` still wins if set,
+so nothing changes for development. The speech model downloads on first run
+with a notice in the overlay.
+
+`DISTRIBUTING.md` ships alongside the exe as `READ ME FIRST.txt`. It carries
+the consent and screen-share points, which matter more to someone who did not
+build this than to you.
+
+> [!CAUTION]
+> Handing this to other people widens the scope note below. Recording both
+> sides of a call is not legal everywhere on one party's consent, and the
+> capture-exclusion feature is normally a policy breach for whoever is on the
+> other end of an interview.
 
 ## Scope
 

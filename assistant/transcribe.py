@@ -1,6 +1,7 @@
 """VAD-gated local transcription into a tagged in-memory transcript."""
 
 import logging
+from collections.abc import Callable
 import re
 import threading
 import time
@@ -107,14 +108,47 @@ def _is_degenerate(text: str) -> bool:
     return len(parts) >= 4 and len(set(parts)) == 1
 
 
-def warm_model() -> None:
+def model_is_cached() -> bool:
+    """Best-effort: has the model already been downloaded?
+
+    Only decides whether to show a "downloading" notice, so a wrong answer
+    costs a spurious or missing status line, never a failure. Reads the default
+    HuggingFace cache layout directly rather than importing huggingface_hub,
+    which is why it is a heuristic: HF_HUB_CACHE and a few other overrides
+    would move the directory out from under it.
+    """
+    import os
+    from pathlib import Path
+
+    home = os.environ.get("HF_HOME")
+    hub = Path(home) / "hub" if home else Path.home() / ".cache" / "huggingface" / "hub"
+    return any(hub.glob(f"models--*--faster-whisper-{config.WHISPER_MODEL}"))
+
+
+def warm_model(on_status: "Callable[[str], None] | None" = None) -> None:
     """Load whisper now rather than on the first utterance.
 
     Construction costs about a second on this machine, and lazily it lands on
     the first question of the meeting - the one moment latency is least
-    affordable.
+    affordable. On a machine that has never run it, this also downloads the
+    model, which is a long silent pause with nothing on screen unless someone
+    is told about it.
     """
-    _get_model()
+    if on_status is not None and not model_is_cached():
+        on_status(
+            f"Downloading the {config.WHISPER_MODEL} speech model. "
+            "About 141 MB, once only."
+        )
+    try:
+        _get_model()
+    except Exception:
+        if on_status is not None:
+            on_status(
+                "Could not load the speech model. Check the internet "
+                "connection, then restart. Nothing will be transcribed until "
+                "this succeeds."
+            )
+        raise
 
 
 def transcribe(audio: np.ndarray) -> str:

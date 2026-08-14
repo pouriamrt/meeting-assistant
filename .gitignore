@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .env
 .sentrux/baseline.json
+
+# PyInstaller output
+build/
+dist/
