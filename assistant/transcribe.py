@@ -195,6 +195,12 @@ def gate_loop(
                     text = transcribe(speech)
                     if text:
                         transcript.append(Turn(src=src, text=text, ts=time.time()))
+                        # The only signal that capture is alive. The overlay
+                        # shows answers, never the transcript, so without this
+                        # a working app and a deaf one look identical - which
+                        # is exactly how a silent mic went unnoticed. Also
+                        # what makes "watch the log" in the checklist possible.
+                        log.info("[%s] %.90s", src, text)
         except Exception:
             # This runs on a daemon thread, and both calls above reach native
             # libraries (ONNX for the VAD, CTranslate2 for the decode) that

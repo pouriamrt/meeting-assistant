@@ -276,6 +276,40 @@ def test_gate_loop_emits_a_turn_when_trailing_silence_closes_an_utterance(monkey
     assert tr.render() == "[them] hello there"
 
 
+def test_gate_loop_logs_every_turn_it_appends(monkeypatch, caplog):
+    # The only observable sign that capture is alive. The overlay shows
+    # answers and never the transcript, so with nothing logged here a working
+    # mic and a dead one produce identical output - which is exactly what
+    # happened: the log showed whisper running and gave no way to tell whether
+    # a turn had landed. The checklist's own "watch the log" was impossible.
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: "four years of postgres")
+    reads = [(_speech(16_000), 0), (_silence(16_000), 16_000)]
+    tr = Transcript(max_turns=10)
+    with caplog.at_level(logging.INFO):
+        tm.gate_loop(FakeRing(reads), "me", tr, StopAfter(4))
+
+    assert len(tr) == 1, "precondition: a turn must have been appended"
+    logged = [r.getMessage() for r in caplog.records]
+    assert any("[me]" in m and "four years of postgres" in m for m in logged), (
+        f"the appended turn was not logged: {logged}"
+    )
+
+
+def test_gate_loop_logs_nothing_when_no_turn_is_appended(monkeypatch, caplog):
+    # The obvious way to break the test above is to log unconditionally, which
+    # would report turns that were never appended - worse than silence,
+    # because it looks like proof the mic works.
+    monkeypatch.setattr(tm, "speech_spans", _spans_over_nonzero)
+    monkeypatch.setattr(tm, "transcribe", lambda a: "")
+    tr = Transcript(max_turns=10)
+    with caplog.at_level(logging.INFO):
+        tm.gate_loop(FakeRing([(_speech(16_000), 0), (_silence(16_000), 16_000)]),
+                     "me", tr, StopAfter(4))
+    assert len(tr) == 0
+    assert not any("[me]" in r.getMessage() for r in caplog.records)
+
+
 def test_gate_loop_discards_pending_when_the_ring_reports_a_gap(monkeypatch):
     # The second read starts far past the cursor: audio was dropped. The
     # partial utterance must be thrown away, not stitched across the gap.
