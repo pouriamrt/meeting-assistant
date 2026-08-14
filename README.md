@@ -31,9 +31,34 @@ Missing `ANTHROPIC_API_KEY` will fail immediately on startup with a clear error.
 |---|---|
 | `Ctrl+Space` | Answer the last question they asked |
 | `Ctrl+Shift+Space` | Answer a typed question, using the transcript |
+| `Ctrl+Alt+Space` | Read the screen and answer what's on it, in code |
 | `Ctrl+Alt+H` | Hide or show the overlay |
 | drag the box | Move it — there is no titlebar to grab |
 | `Ctrl+Alt+Q` | Quit |
+
+## Screen mode
+
+`Ctrl+Alt+Space` sends a screenshot of every monitor **and** the transcript.
+The screen carries the signature, the starter code, the error. The transcript
+carries the constraints that are only ever spoken — "no built-ins", "optimize
+for memory". Neither alone is enough, which is why both go.
+
+It answers under a second system prompt that writes real code instead of the
+spoken cue cards `Ctrl+Space` produces. On a diagram or a dashboard it falls
+back to bullets on its own.
+
+Measured, one monitor at 1536x864: 140 ms to grab, 407 KB of PNG, about 7
+seconds to a finished answer, roughly $0.025 a press. Output tokens are most
+of that — code is much longer than four bullets.
+
+Monitors are sent as one image each, never stitched into one wide picture.
+Two 1920-wide screens stitched are 3840 across, and the API scales anything
+past 1568 on the long edge, which lands the pair at 441 px tall — too short to
+read code off. Separate images each get their own scaling budget.
+
+The overlay never appears in the screenshot: `WDA_EXCLUDEFROMCAPTURE` hides it
+from this capture path too, so the model cannot read its own last answer back.
+Verified by sampling the pixel under the overlay with exclusion on and off.
 
 ## Tuning
 

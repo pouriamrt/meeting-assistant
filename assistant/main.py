@@ -3,12 +3,12 @@
 import logging
 import queue
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import anthropic
 
-from . import answer, config, prompts
+from . import answer, config, prompts, screen
 from .capture import Capture
 from .overlay import Overlay
 from .transcribe import Transcript, gate_loop, warm_model
@@ -98,14 +98,18 @@ def _install_hotkeys(
     ui_queue: "queue.Queue",
     answer_gate: _AnswerGate,
 ) -> "keyboard.GlobalHotKeys":
-    """Build the four hotkey callbacks and start the listener.
+    """Build the five hotkey callbacks and start the listener.
 
     Split out of main() for length. The callbacks all close over the same four
     objects, which is why those arrive as parameters rather than through
     module state.
     """
 
-    def start_answer(tail: str) -> None:
+    def start_answer(
+        tail: str,
+        images: "Sequence[bytes]" = (),
+        system: str | None = None,
+    ) -> None:
         gen_queue = answer_gate.start(ui_queue)
 
         def run() -> None:
@@ -113,7 +117,9 @@ def _install_hotkeys(
             # ui_queue.put("clear") or usage-logging around it - same
             # dies-silently shape as _guarded, so it gets the same wrap.
             try:
-                answer.stream_answer(client, transcript.render(), tail, gen_queue)
+                answer.stream_answer(
+                    client, transcript.render(), tail, gen_queue, images, system
+                )
             except Exception:
                 log.exception("answer thread failed")
 
@@ -137,6 +143,24 @@ def _install_hotkeys(
 
         ui_queue.put(("prompt", on_typed))
 
+    def on_screen() -> None:
+        # Grabbed here, on pynput's thread, rather than inside the answer
+        # thread: the screenshot must be of what was on screen when the key
+        # went down. Costs the listener ~200ms of PNG encoding, which is
+        # invisible unless two hotkeys are pressed inside that window.
+        try:
+            images = screen.grab()
+        except Exception:
+            # Routed through the gate like every other press so it supersedes
+            # a still-streaming answer instead of being written over by it.
+            log.exception("screen grab failed")
+            answer_gate.start(ui_queue).put(("status", "screen grab failed"))
+            return
+        if not images:
+            answer_gate.start(ui_queue).put(("status", "no monitor to capture"))
+            return
+        start_answer(prompts.screen_tail(), images, prompts.CODE_SYSTEM)
+
     def on_toggle() -> None:
         ui_queue.put(("toggle", None))
 
@@ -151,6 +175,7 @@ def _install_hotkeys(
         {
             "<ctrl>+<space>": _guarded("last_question", on_last_question),
             "<ctrl>+<shift>+<space>": _guarded("query", on_query),
+            "<ctrl>+<alt>+<space>": _guarded("screen", on_screen),
             "<ctrl>+<alt>+h": _guarded("toggle", on_toggle),
             "<ctrl>+<alt>+q": _guarded("quit", on_quit),
         }
@@ -199,7 +224,7 @@ def main() -> None:
 
         log.info(
             "ready - ctrl+space answer, ctrl+shift+space query, "
-            "ctrl+alt+h hide, ctrl+alt+q quit"
+            "ctrl+alt+space screen, ctrl+alt+h hide, ctrl+alt+q quit"
         )
         overlay.run()  # blocks: Tkinter owns the main thread
     finally:

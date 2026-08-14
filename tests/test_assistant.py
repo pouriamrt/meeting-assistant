@@ -445,6 +445,166 @@ def test_query_tail_embeds_the_typed_question():
 
 
 #
+# Screen mode. The third hotkey sends screenshots alongside the transcript,
+# under its own system prompt: the speaking prompt hard-enforces 3-5 bullets
+# of 12 words, which is exactly wrong for a coding question that wants real
+# code. Two prompts means two cached prefixes, deliberately.
+
+import base64  # noqa: E402
+
+import assistant.screen as screen_mod  # noqa: E402
+
+
+def _png_blocks(req):
+    return [b for b in req["messages"][0]["content"] if b["type"] == "image"]
+
+
+def test_screen_request_puts_images_before_the_text():
+    # Documented ordering for multi-modal accuracy: image first, then the
+    # question about it. Reversed, the model reads the ask before it has
+    # anything to look at.
+    req = answer.build_request("[them] hi", "tail", images=[b"\x89PNGfake"])
+    kinds = [b["type"] for b in req["messages"][0]["content"]]
+    assert kinds == ["image", "text", "text"]
+
+
+def test_screen_request_base64s_each_png_as_its_own_block():
+    req = answer.build_request(
+        "t", "tail", images=[b"\x89PNGone", b"\x89PNGtwo"]
+    )
+    blocks = _png_blocks(req)
+    assert len(blocks) == 2, "one block per monitor, never stitched into one"
+    assert [b["source"]["data"] for b in blocks] == [
+        base64.b64encode(b"\x89PNGone").decode(),
+        base64.b64encode(b"\x89PNGtwo").decode(),
+    ]
+    assert all(b["source"]["media_type"] == "image/png" for b in blocks)
+    assert all(b["source"]["type"] == "base64" for b in blocks)
+
+
+def test_audio_only_requests_carry_no_image_block():
+    # Regression guard on the default argument. A mutable default or a stray
+    # image block would add ~1800 tokens to every Ctrl+Space press, invisibly.
+    assert _png_blocks(answer.build_request("t", "tail")) == []
+    assert len(answer.build_request("t", "tail")["messages"][0]["content"]) == 2
+
+
+def test_screen_mode_uses_the_code_prompt_not_the_speaking_one():
+    # The whole reason screen mode exists. If these ever collapse to one
+    # prompt, screen answers come back as 12-word bullets and the code is gone.
+    spoken = answer.build_request("t", prompts.last_question_tail())
+    coded = answer.build_request(
+        "t", prompts.screen_tail(), images=[b"x"], system=prompts.CODE_SYSTEM
+    )
+    assert spoken["system"][0]["text"] is prompts.SYSTEM
+    assert coded["system"][0]["text"] is prompts.CODE_SYSTEM
+    assert prompts.CODE_SYSTEM != prompts.SYSTEM
+
+
+def test_code_prompt_keeps_its_own_cache_breakpoint():
+    req = answer.build_request(
+        "t", "tail", images=[b"x"], system=prompts.CODE_SYSTEM
+    )
+    assert req["system"][0]["cache_control"]["ttl"] == "1h"
+    # Images are ~1800 tokens and byte-identical only if the screen never
+    # changed. A breakpoint on them would write a fresh 1h entry per press.
+    marked = [b for b in req["messages"][0]["content"] if "cache_control" in b]
+    assert marked == [], "no cache_control below the system block"
+
+
+def test_code_prompt_carries_nothing_volatile():
+    # Not the blanket brace ban SYSTEM gets: this prompt contains a Python
+    # example and `seen = {}` is legitimate. The real invariant is that the
+    # placeholder was substituted, so assert that directly.
+    assert str(datetime.now().year) not in prompts.CODE_SYSTEM
+    assert "{NAME}" not in prompts.CODE_SYSTEM
+    assert config.NAME in prompts.CODE_SYSTEM, "substitution never happened"
+
+
+def test_code_prompt_still_bans_the_machine_vocabulary():
+    # Screen mode swaps the output shape, not the voice. Losing the humanizer
+    # block here would make every code explanation read as generated.
+    assert "leverage" in prompts.CODE_SYSTEM
+    assert "Great question" in prompts.CODE_SYSTEM
+
+
+def test_screen_tail_names_both_inputs():
+    tail = prompts.screen_tail()
+    assert "creen" in tail, "must tell the model the images are the screen"
+    assert "ranscript" in tail, "must tell it the transcript is what was said"
+
+
+class _FakeShot:
+    def __init__(self, tag):
+        self.rgb = tag
+        self.size = (1536, 864)
+
+
+class _FakeSct:
+    """Stand-in for mss.mss(). monitors[0] is mss's all-in-one union."""
+
+    def __init__(self, count):
+        self.monitors = [{"union": True}] + [{"i": i} for i in range(count)]
+        self.grabbed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def grab(self, mon):
+        self.grabbed.append(mon)
+        return _FakeShot(f"rgb{mon['i']}".encode())
+
+
+def test_grab_returns_one_png_per_monitor(monkeypatch):
+    sct = _FakeSct(count=2)
+    monkeypatch.setattr(screen_mod.mss, "MSS", lambda: sct)
+    monkeypatch.setattr(
+        screen_mod.mss.tools, "to_png", lambda rgb, size: b"PNG:" + rgb
+    )
+
+    out = screen_mod.grab()
+
+    assert out == [b"PNG:rgb0", b"PNG:rgb1"]
+    # monitors[0] IS the stitched union of every screen - grabbing it would
+    # hand back the squashed image this design exists to avoid, plus a
+    # duplicate of every monitor already captured.
+    assert sct.grabbed == [{"i": 0}, {"i": 1}]
+
+
+def test_grab_on_a_single_monitor_returns_one_image(monkeypatch):
+    sct = _FakeSct(count=1)
+    monkeypatch.setattr(screen_mod.mss, "MSS", lambda: sct)
+    monkeypatch.setattr(
+        screen_mod.mss.tools, "to_png", lambda rgb, size: b"PNG:" + rgb
+    )
+    assert screen_mod.grab() == [b"PNG:rgb0"]
+
+
+def test_code_prompt_clears_the_512_token_cache_floor():
+    # The silent failure this whole file already documents once: below Opus 5's
+    # 512-token minimum the block stops caching with no error and
+    # cache_creation_input_tokens: 0. A characters/3.6 estimate was measured
+    # 45% wrong on SYSTEM, so this counts for real rather than estimating.
+    import os
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        pytest.skip("needs a live key to count tokens")
+
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=config.api_key())
+    count = client.messages.count_tokens(
+        model="claude-opus-5",
+        system=[{"type": "text", "text": prompts.CODE_SYSTEM}],
+        messages=[{"role": "user", "content": "x"}],
+    ).input_tokens
+    assert count >= 512, f"CODE_SYSTEM is {count} tokens - will not cache"
+
+
+#
 # No GUI, no hotkeys, no audio device needed here: _AnswerGate is plain
 # counter-and-lock logic, and a fake queue exercises it exactly as
 # `answer.stream_answer` would.
