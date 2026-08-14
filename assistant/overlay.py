@@ -29,7 +29,8 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 _BG = "#101014"
 _FG = "#e8e8ea"
-_FONT = ("Segoe UI", 12)
+_FONT_FAMILY = "Segoe UI"
+_FONT_SIZE = 12             # starting size only; Ctrl+wheel moves it at runtime
 
 _GRIP = "#2a2a32"           # just visible against _BG, not attention-grabbing
 _GRIP_PX = 16
@@ -66,7 +67,7 @@ class Overlay:
             self.root,
             bg=_BG,
             fg=_FG,
-            font=_FONT,
+            font=(_FONT_FAMILY, _FONT_SIZE),
             wrap="word",
             borderwidth=0,
             highlightthickness=0,
@@ -80,14 +81,17 @@ class Overlay:
         self._make_draggable(self.text)
         self._make_draggable(self.root)
 
-        self._font_size = _FONT[1]
-        self._resize_from: tuple[int, int, int, int] | None = None
-        self._grip = self._make_resizable()
-        self._make_font_scalable()
-
         self._visible = True
         self._alive = True  # cleared on quit, so the drain stops rescheduling
         self._entry: tk.Entry | None = None  # inline query input, see _open_query_entry
+
+        # After _entry: _apply_font reads it, and binding the handler before
+        # the attribute exists leaves a window - narrow, but the kind that
+        # only shows up as an AttributeError on a keystroke.
+        self._font_size = _FONT_SIZE
+        self._resize_from: tuple[int, int, int, int] | None = None
+        self._grip = self._make_resizable()
+        self._make_font_scalable()
         # Fully transparent until exclusion is confirmed. The window has to be
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
@@ -212,10 +216,14 @@ class Overlay:
             widget.bind("<Control-MouseWheel>", scale)
 
     def _apply_font(self) -> None:
-        """The query entry is created lazily, so the current size has to live
-        on the instance rather than in _FONT - an entry opened after scaling
-        would otherwise appear at 12pt beside 20pt body text."""
-        font = (_FONT[0], self._font_size)
+        """Push the current size onto every widget that shows text.
+
+        The size lives on the instance rather than in a module constant
+        because the query entry is built lazily - reading the constant would
+        open it at 12pt beside 20pt body text. _open_query_entry calls this
+        instead of composing the font itself, so a new entry cannot drift.
+        """
+        font = (_FONT_FAMILY, self._font_size)
         self.text.configure(font=font)
         if self._entry is not None:
             self._entry.configure(font=font)
@@ -247,7 +255,6 @@ class Overlay:
             bg=_BG,
             fg=_FG,
             insertbackground=_FG,
-            font=(_FONT[0], self._font_size),
             borderwidth=0,
             highlightthickness=0,
         )
@@ -285,6 +292,10 @@ class Overlay:
         entry.bind("<Return>", submit)
         entry.bind("<Escape>", cancel)
         self._entry = entry
+        # Sized here rather than in the constructor above, so there is exactly
+        # one place that decides what font a widget gets. Composing it twice
+        # is how an entry opened after Ctrl+wheel ends up at the old size.
+        self._apply_font()
 
     def _drain(self) -> None:
         try:

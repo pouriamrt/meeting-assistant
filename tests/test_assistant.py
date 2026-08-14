@@ -830,7 +830,7 @@ def _bare_overlay():
     ov._alive = False  # skip _drain's after() reschedule, no real Tk loop
     # __new__ skips __init__, so anything __init__ establishes has to be set
     # by hand. _open_query_entry reads this to size a lazily-created entry.
-    ov._font_size = overlay_mod._FONT[1]
+    ov._font_size = overlay_mod._FONT_SIZE
     return ov
 
 
@@ -1156,7 +1156,7 @@ def test_a_query_entry_opened_after_scaling_uses_the_current_size(monkeypatch):
         ov.root.update()
         assert ov._entry is not None
         assert _font_size_of(ov._entry) == ov._font_size
-        assert _font_size_of(ov._entry) != overlay_mod._FONT[1], (
+        assert _font_size_of(ov._entry) != overlay_mod._FONT_SIZE, (
             "entry fell back to the module constant"
         )
     finally:
