@@ -318,7 +318,7 @@ not taken as evidence on its own.
 ## Building an exe for someone else
 
 ```powershell
-.uild.ps1        # dist\meeting-assistant.zip, about 100 MB
+.\build.ps1        # dist\meeting-assistant.zip, about 100 MB
 ```
 
 A folder build, not one file: a one-file exe unpacks ~250MB to `%TEMP%` on
