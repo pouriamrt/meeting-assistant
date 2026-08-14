@@ -63,7 +63,14 @@ def build_request(
         }
         for png in images
     ]
-    content.append({"type": "text", "text": transcript_text})
+    # Only when there is something to send. The API rejects the whole request
+    # with "text content blocks must be non-empty", and an empty transcript is
+    # ordinary: on_screen and on_query both fire happily before anyone has
+    # spoken, and a screenshot on its own is a legitimate question.
+    # on_last_question has its own len()==0 guard, so this is not that check
+    # moved - it covers the two callers that deliberately do not want one.
+    if transcript_text.strip():
+        content.append({"type": "text", "text": transcript_text})
     content.append({"type": "text", "text": tail})
 
     req: dict = {

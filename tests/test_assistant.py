@@ -489,6 +489,36 @@ def test_audio_only_requests_carry_no_image_block():
     assert len(answer.build_request("t", "tail")["messages"][0]["content"]) == 2
 
 
+def test_no_empty_text_block_when_the_transcript_is_empty():
+    # Live 400: "messages: text content blocks must be non-empty". Pressing
+    # Ctrl+Alt+Space before anyone has spoken renders an empty transcript,
+    # which became an empty text block and the whole request was rejected.
+    # on_last_question guards len(transcript)==0; on_screen and on_query do
+    # not, and should not - a screenshot alone is a legitimate question. So
+    # the guard belongs here, where every caller passes through.
+    for req in (
+        answer.build_request("", "tail"),
+        answer.build_request("", "tail", images=[b"\x89PNG"]),
+        answer.build_request("   \n  ", "tail"),
+    ):
+        blocks = req["messages"][0]["content"]
+        empties = [
+            b for b in blocks
+            if b["type"] == "text" and not b["text"].strip()
+        ]
+        assert empties == [], f"empty text block would 400: {empties}"
+        assert blocks, "content must never be an empty list either"
+        assert blocks[-1]["text"] == "tail", "the tail must survive"
+
+
+def test_a_present_transcript_is_still_sent():
+    # The obvious way to break the fix above is to drop the transcript block
+    # unconditionally, which passes that test and silently removes all context.
+    req = answer.build_request("[them] hello", "tail")
+    texts = [b["text"] for b in req["messages"][0]["content"] if b["type"] == "text"]
+    assert texts == ["[them] hello", "tail"]
+
+
 def test_screen_mode_uses_the_code_prompt_not_the_speaking_one():
     # The whole reason screen mode exists. If these ever collapse to one
     # prompt, screen answers come back as 12-word bullets and the code is gone.
