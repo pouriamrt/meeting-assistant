@@ -1,6 +1,8 @@
 """Key storage. A credential at rest, so the failure modes matter more than usual."""
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from assistant import apikey
 
@@ -119,3 +121,16 @@ def test_resolve_saves_what_the_prompt_returned(monkeypatch):
     monkeypatch.setattr(apikey, "prompt", lambda: KEY)
     assert apikey.resolve() == KEY
     assert apikey.stored() == KEY, "the key was used but never persisted"
+
+
+# Serialization round trip, so a property rather than the one example above.
+# Keys are opaque strings to this module; it must not care what is in them.
+@given(key=st.text(min_size=1, max_size=200))
+@settings(max_examples=40, deadline=None)
+def test_any_key_survives_the_round_trip(key):
+    # The autouse fixture already points _key_path at a temp file, and every
+    # example overwrites it, which is exactly what a round trip needs. Nothing
+    # is reassigned here on purpose: a raw assignment inside a @given body
+    # outlives the example that made it.
+    apikey.save(key)
+    assert apikey.stored() == key

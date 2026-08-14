@@ -1,6 +1,8 @@
 """VAD-gated local transcription into a tagged in-memory transcript."""
 
 import logging
+import os
+from pathlib import Path
 from collections.abc import Callable
 import re
 import threading
@@ -86,17 +88,35 @@ def speech_spans(audio: np.ndarray) -> list[dict]:
 def _get_model() -> WhisperModel:
     global _model
     if _model is None:
-        # local_files_only once it is cached, so a launch makes no network
-        # call at all. Otherwise every start does a HuggingFace revision check:
-        # 0.5s here, but 2.8s when that host is unreachable, which is exactly
-        # the case on a locked-down machine someone else is running this on.
-        _model = WhisperModel(
-            config.WHISPER_MODEL,
+        # Offline first, network only if that fails. A launch with a good
+        # cache then makes no network call at all, which saves the 0.5s
+        # HuggingFace revision check here and 2.8s when that host is
+        # unreachable - the locked-down machine someone else is running this
+        # on.
+        #
+        # Asked rather than predicted, deliberately. Deciding it from
+        # model_is_cached() was tried and was a trap: huggingface_hub creates
+        # the model directory the moment a download STARTS, so a first run
+        # interrupted by a closed lid or a dropped connection leaves a
+        # directory that exists and holds nothing usable. The heuristic then
+        # says cached forever, local_files_only stays on, and the app can
+        # never repair itself because the network is the thing it just
+        # disabled. Reproduced: LocalEntryNotFoundError on a blobs directory
+        # holding one .incomplete file.
+        kwargs = dict(
             device="cpu",
             compute_type="int8",
             cpu_threads=config.WHISPER_THREADS,
-            local_files_only=model_is_cached(),
         )
+        try:
+            _model = WhisperModel(
+                config.WHISPER_MODEL, local_files_only=True, **kwargs
+            )
+        except Exception:
+            log.info("no usable local model, fetching", exc_info=True)
+            _model = WhisperModel(
+                config.WHISPER_MODEL, local_files_only=False, **kwargs
+            )
     return _model
 
 
@@ -117,14 +137,13 @@ def model_is_cached() -> bool:
     """Best-effort: has the model already been downloaded?
 
     Only decides whether to show a "downloading" notice, so a wrong answer
-    costs a spurious or missing status line, never a failure. Reads the default
+    costs a spurious or missing status line, never a failure. Keep it that
+    way: it answers "has a download ever started", not "is there a usable
+    model here", and _get_model deliberately asks rather than trusting it. Reads the default
     HuggingFace cache layout directly rather than importing huggingface_hub,
     which is why it is a heuristic: HF_HUB_CACHE and a few other overrides
     would move the directory out from under it.
     """
-    import os
-    from pathlib import Path
-
     home = os.environ.get("HF_HOME")
     hub = Path(home) / "hub" if home else Path.home() / ".cache" / "huggingface" / "hub"
     return any(hub.glob(f"models--*--faster-whisper-{config.WHISPER_MODEL}"))
@@ -139,12 +158,14 @@ def warm_model(on_status: "Callable[[str], None] | None" = None) -> None:
     model, which is a long silent pause with nothing on screen unless someone
     is told about it.
     """
-    if on_status is not None and not model_is_cached():
-        on_status(
-            f"Downloading the {config.WHISPER_MODEL} speech model. "
-            "About 141 MB, once only."
-        )
     try:
+        # Inside the guard: this only decides whether to show a notice, so a
+        # raise from it must not be what stops the model loading.
+        if on_status is not None and not model_is_cached():
+            on_status(
+                f"Downloading the {config.WHISPER_MODEL} speech model. "
+                "About 141 MB, once only."
+            )
         _get_model()
     except Exception:
         if on_status is not None:

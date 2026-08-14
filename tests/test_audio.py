@@ -382,38 +382,68 @@ def _silence(n):
     return np.zeros(n, dtype=np.float32)
 
 
-def test_a_cached_model_is_loaded_without_touching_the_network(monkeypatch):
-    # Every launch otherwise does a HuggingFace revision check, which costs
-    # 2.8s instead of 0.5s when that host is unreachable - a locked-down
-    # machine belonging to whoever this was handed to.
+def test_a_good_cache_is_loaded_without_touching_the_network(monkeypatch):
+    # Every launch otherwise does a HuggingFace revision check: 0.5s here, 2.8s
+    # when that host is unreachable.
     import assistant.transcribe as tm
 
-    seen = {}
+    calls = []
 
     class FakeModel:
         def __init__(self, name, **kw):
-            seen.update(kw)
+            calls.append(kw["local_files_only"])
 
     monkeypatch.setattr(tm, "WhisperModel", FakeModel)
     monkeypatch.setattr(tm, "_model", None)
-    monkeypatch.setattr(tm, "model_is_cached", lambda: True)
     tm._get_model()
-    assert seen.get("local_files_only") is True, "a cached model still hit the network"
+    assert calls == [True], f"a good cache still reached the network: {calls}"
 
 
-def test_a_missing_model_is_allowed_to_download(monkeypatch):
-    # The other half: local_files_only must not be hardcoded, or a first run
-    # can never fetch the model at all.
+def test_an_unusable_cache_falls_back_to_downloading(monkeypatch):
+    # The trap this replaced: huggingface_hub creates the model directory the
+    # moment a download STARTS, so an interrupted first run leaves a directory
+    # that exists and holds nothing. Predicting from that made the failure
+    # permanent, because the fix needs the network the prediction disabled.
     import assistant.transcribe as tm
 
-    seen = {}
+    calls = []
 
     class FakeModel:
         def __init__(self, name, **kw):
-            seen.update(kw)
+            calls.append(kw["local_files_only"])
+            if kw["local_files_only"]:
+                raise OSError("LocalEntryNotFoundError")
 
     monkeypatch.setattr(tm, "WhisperModel", FakeModel)
     monkeypatch.setattr(tm, "_model", None)
-    monkeypatch.setattr(tm, "model_is_cached", lambda: False)
     tm._get_model()
-    assert seen.get("local_files_only") is False, "first run could never download"
+    assert calls == [True, False], f"no retry over the network: {calls}"
+
+
+def test_a_half_downloaded_cache_does_not_brick_the_app(tmp_path, monkeypatch):
+    # The real shape, not a stub: a model directory holding one .incomplete
+    # blob, which is exactly what a dropped connection leaves behind.
+    import assistant.transcribe as tm
+
+    blobs = tmp_path / "hub" / "models--Systran--faster-whisper-base.en" / "blobs"
+    blobs.mkdir(parents=True)
+    (blobs / "abc.incomplete").write_bytes(b"partial")
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+
+    assert tm.model_is_cached() is True, (
+        "the heuristic is supposed to be fooled by this; that is why "
+        "_get_model must not trust it"
+    )
+
+    calls = []
+
+    class FakeModel:
+        def __init__(self, name, **kw):
+            calls.append(kw["local_files_only"])
+            if kw["local_files_only"]:
+                raise OSError("LocalEntryNotFoundError")
+
+    monkeypatch.setattr(tm, "WhisperModel", FakeModel)
+    monkeypatch.setattr(tm, "_model", None)
+    tm._get_model()
+    assert calls == [True, False], "a partial cache left the app unable to recover"

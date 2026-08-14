@@ -39,7 +39,13 @@ def acquire() -> bool:
     if not handle:
         # Cannot tell either way, so allow the launch. Refusing to start over a
         # failed advisory check would be worse than the duplicate it prevents.
-        log.warning("could not create the instance mutex", exc_info=True)
+        # No exception is in flight here, so exc_info would print
+        # "NoneType: None". use_last_error is set precisely so the reason is
+        # readable; read it.
+        log.warning(
+            "could not create the instance mutex: %s",
+            ctypes.WinError(ctypes.get_last_error()),
+        )
         return True
     if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
         _kernel32.CloseHandle(handle)

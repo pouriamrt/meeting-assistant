@@ -8,7 +8,6 @@ free when a terminal is attached.
 import logging
 import multiprocessing
 import sys
-import traceback
 from pathlib import Path
 
 
@@ -55,23 +54,31 @@ def main() -> int:
     # on Windows means the app launching itself repeatedly.
     multiprocessing.freeze_support()
 
-    log_path = _setup_logging()
+    # Inside the try as well. Setting up logging can itself fail, on an
+    # unwritable %LOCALAPPDATA% or a log file still held by a copy shutting
+    # down, and outside the guard that failure is the exact silent vanish this
+    # module exists to prevent.
+    log_path = None
     try:
+        log_path = _setup_logging()
         from assistant.main import main as run
 
         run()
         return 0
-    except Exception as exc:
-        logging.exception("fatal")
-        _show_fatal(
-            f"{exc}\n\nFull details: {log_path}"
-        )
-        return 1
-    except BaseException:
-        # KeyboardInterrupt and SystemExit are not failures worth a dialog,
-        # but the traceback still belongs in the log.
-        logging.info("stopped: %s", traceback.format_exc(limit=0).strip())
+    except SystemExit as exc:
+        # A deliberate exit, so keep its code. Reporting 0 for sys.exit(1)
+        # would tell a caller the run succeeded.
+        return int(exc.code or 0)
+    except KeyboardInterrupt:
+        logging.info("interrupted")
         return 0
+    except BaseException as exc:
+        # Broad on purpose: anything that gets this far ends the process, and a
+        # windowed app that ends without a word looks like it never started.
+        logging.exception("fatal")
+        where = f"\n\nFull details: {log_path}" if log_path else ""
+        _show_fatal(f"{type(exc).__name__}: {exc}{where}")
+        return 1
 
 
 if __name__ == "__main__":

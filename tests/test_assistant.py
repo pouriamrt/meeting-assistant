@@ -626,12 +626,16 @@ def test_screen_press_logs_a_digest_of_what_it_captured(monkeypatch, caplog):
     )
 
 
-def test_a_second_instance_is_refused():
+def test_a_second_instance_is_refused(monkeypatch):
     # Two copies both capture the same audio and both run whisper on it, which
     # is invisible except as everything being slower. Easy to hit by accident
     # with an exe, where there is no terminal showing one already running.
     from assistant import single_instance
 
+    # A unique name per run. The real one is session-global, so a copy of the
+    # app actually running on this machine would turn this red - the same
+    # isolation failure the ui.json fixture exists to prevent.
+    monkeypatch.setattr(single_instance, "_NAME", "meeting-assistant-test-refused")
     try:
         assert single_instance.acquire() is True, "the first copy was refused"
         assert single_instance.acquire() is False, "a second copy was allowed"
@@ -639,10 +643,11 @@ def test_a_second_instance_is_refused():
         single_instance.release()
 
 
-def test_the_claim_is_dropped_on_release():
+def test_the_claim_is_dropped_on_release(monkeypatch):
     # Otherwise a clean exit still blocks the next launch until reboot.
     from assistant import single_instance
 
+    monkeypatch.setattr(single_instance, "_NAME", "meeting-assistant-test-release")
     assert single_instance.acquire() is True
     single_instance.release()
     try:

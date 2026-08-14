@@ -13,6 +13,7 @@ remembering it at all.
 
 import ctypes
 import logging
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -20,8 +21,11 @@ from . import config, uistate
 
 log = logging.getLogger(__name__)
 
-_ENTROPY = b"meeting-assistant"  # secondary key, so the user account alone
-                                 # is not enough to decrypt the blob
+# Secondary key. It ships inside the exe, so it is not a secret and does not
+# defend against someone reading the binary. What it does buy: another
+# program running as this user cannot decrypt the blob by calling
+# CryptUnprotectData with no entropy, which is the realistic case.
+_ENTROPY = b"meeting-assistant"
 
 
 class _Blob(ctypes.Structure):
@@ -41,6 +45,11 @@ _crypt32.CryptUnprotectData.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_Blob),
 ]
 _crypt32.CryptUnprotectData.restype = wintypes.BOOL
+# Declared for the same reason the overlay declares its user32 calls: without
+# argtypes ctypes marshals a pointer as C int, which is 32 bits on 64-bit
+# Windows.
+_kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+_kernel32.LocalFree.restype = wintypes.HLOCAL
 
 
 def _key_path() -> Path:
@@ -56,7 +65,7 @@ def _as_blob(data: bytes) -> "tuple[_Blob, ctypes.Array]":
     return _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
 
 
-def _dpapi(fn, data: bytes) -> bytes:
+def _dpapi(fn: "Callable[..., int]", data: bytes) -> bytes:
     """Protect or unprotect, with _ENTROPY as the secondary key both ways.
 
     Entropy is the third parameter, NOT the second. The second is szDataDescr,
@@ -133,7 +142,7 @@ def prompt() -> "str | None":
     entry.pack(pady=14)
     entry.focus_set()
 
-    def submit(_event=None) -> None:
+    def submit(_event: "object | None" = None) -> None:
         value = entry.get().strip()
         if value:
             typed.append(value)
