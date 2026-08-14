@@ -9,7 +9,7 @@ and answers into a window that screen capture cannot see.**
 ![GPU not required](https://img.shields.io/badge/GPU-not%20required-6f61a3?style=flat-square&labelColor=101014)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13+-2a2a32?style=flat-square&labelColor=101014&logo=python&logoColor=white)
 ![Windows build 19041+](https://img.shields.io/badge/windows-build%2019041+-2a2a32?style=flat-square&labelColor=101014&logo=windows&logoColor=white)
-![96 tests](https://img.shields.io/badge/tests-96%20passing-2a2a32?style=flat-square&labelColor=101014)
+![122 tests](https://img.shields.io/badge/tests-122%20passing-2a2a32?style=flat-square&labelColor=101014)
 
 <img src="docs/overlay.png" alt="The overlay showing a cue card over a dark background" width="560">
 
@@ -264,7 +264,7 @@ Reach for `SILENCE_END_MS` first if it keeps interrupting you. At 700ms a
 natural pause mid-question splits one question into two turns.
 
 <details>
-<summary>Two knobs with a catch</summary>
+<summary>One knob with a catch</summary>
 
 <br>
 
@@ -272,15 +272,24 @@ natural pause mid-question splits one question into two turns.
 fails with `rate limit of 0 fast mode input tokens per minute`. That is
 unusable, not merely slower.
 
-Overlay size and font do not persist across restarts. Change `geometry(...)` and
-`_FONT_SIZE` in `assistant/overlay.py` to move the defaults.
-
 </details>
+
+### What it remembers
+
+Window size, position, font size and opacity are written to
+`%LOCALAPPDATA%\meeting-assistant\ui.json` and restored next launch. Delete that
+file to get the defaults back.
+
+Everything read from it is re-clamped on the way in, against the monitors you
+have *now*. A saved position on a monitor you have since unplugged gets pulled
+back on screen, and a hand-edited `"alpha": 0` is raised to the floor. The file
+is otherwise a way to hand yourself an invisible or unreachable window, since
+the overlay has no titlebar to recover it by.
 
 ## Tests
 
 ```bash
-uv run pytest -q          # 96 tests, about 3 seconds
+uv run pytest -q          # 122 tests, about 4 seconds
 uv run ruff check .
 ```
 

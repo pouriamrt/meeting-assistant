@@ -8,7 +8,7 @@ from typing import NamedTuple
 import pytest
 import numpy as np
 
-from assistant import answer, config, prompts
+from assistant import answer, config, prompts, uistate
 from assistant.audio_ring import AudioRing
 from assistant.capture import to_mono_16k
 from assistant.transcribe import Transcript, Turn, speech_spans
@@ -959,7 +959,7 @@ def _bare_overlay():
     ov._alive = False  # skip _drain's after() reschedule, no real Tk loop
     # __new__ skips __init__, so anything __init__ establishes has to be set
     # by hand. _open_query_entry reads this to size a lazily-created entry.
-    ov._font_size = overlay_mod._FONT_SIZE
+    ov._font_size = uistate.DEFAULT.font_size
     return ov
 
 
@@ -1493,7 +1493,7 @@ def test_a_query_entry_opened_after_scaling_uses_the_current_size(monkeypatch):
         ov.root.update()
         assert ov._entry is not None
         assert _font_size_of(ov._entry) == ov._font_size
-        assert _font_size_of(ov._entry) != overlay_mod._FONT_SIZE, (
+        assert _font_size_of(ov._entry) != uistate.DEFAULT.font_size, (
             "entry fell back to the module constant"
         )
     finally:
@@ -1648,6 +1648,135 @@ def test_shift_wheel_does_not_also_scroll_the_text(monkeypatch):
         assert ov.text.xview() == before, f"the text scrolled sideways: {before}"
     finally:
         ov.root.destroy()
+
+
+def test_desktop_rect_is_converted_out_of_physical_pixels():
+    # mss reports physical pixels, Tk here is DPI-unaware and positions windows
+    # in scaled ones. Measured on this machine: a 1920-wide screen at 125% is
+    # 1536 to Tk. Clamping in the wrong units puts the window a quarter of a
+    # screen off the right edge, which is the failure the clamp exists to stop.
+    assert overlay_mod._scale_rect((0, 0, 1920, 1080), 1536 / 1920) == (0, 0, 1536, 864)
+    # A screen left of the primary keeps its negative origin through the scale.
+    assert overlay_mod._scale_rect((-1920, 0, 1920, 1080), 0.8) == (-1536, 0, 1536, 864)
+    # No scaling is a no-op, not a rounding drift.
+    assert overlay_mod._scale_rect((0, 0, 2560, 1440), 1.0) == (0, 0, 2560, 1440)
+
+
+def test_the_clamp_uses_the_same_units_tk_positions_windows_in(monkeypatch):
+    # The end-to-end version of the above: whatever _desktop reports, a hostile
+    # x must land inside the area Tk itself calls the screen.
+    uistate.save(uistate.UiState(w=460, h=300, x=99999, y=40, font_size=12, alpha=1.0))
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        assert ov.root.winfo_x() < ov.root.winfo_screenwidth(), (
+            f"x={ov.root.winfo_x()} is off a {ov.root.winfo_screenwidth()}px screen"
+        )
+    finally:
+        ov.root.destroy()
+
+
+def test_a_saved_state_is_applied_on_startup(monkeypatch):
+    # The whole point of the feature: what you set last time is what you get.
+    uistate.save(uistate.UiState(w=612, h=388, x=140, y=96, font_size=19, alpha=0.55))
+
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        assert ov._font_size == 19, "font size was not restored"
+        assert ov._alpha == pytest.approx(0.55), "opacity was not restored"
+        assert _font_size_of(ov.text) == 19, "the widget kept the default font"
+        assert (ov.root.winfo_width(), ov.root.winfo_height()) == (612, 388)
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (140, 96)
+    finally:
+        ov.root.destroy()
+
+
+def test_a_hostile_saved_state_cannot_produce_an_unusable_window(monkeypatch):
+    # The file is the back door around every live clamp. Zero alpha and an
+    # off-screen origin are each enough to make the overlay unrecoverable.
+    uistate.save(
+        uistate.UiState(w=5, h=5, x=99999, y=-9999, font_size=400, alpha=0.0)
+    )
+
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        assert ov._alpha >= uistate.ALPHA_MIN, "restored an invisible overlay"
+        assert ov._font_size <= uistate.FONT_MAX
+        assert ov.root.winfo_width() >= uistate.MIN_W
+        assert ov.root.winfo_height() >= uistate.MIN_H
+        assert ov.root.winfo_y() >= 0, "drag bar restored above the screen top"
+        assert ov.root.winfo_x() < ov.root.winfo_screenwidth(), "restored off-screen"
+    finally:
+        ov.root.destroy()
+
+
+def test_quitting_writes_the_current_geometry(monkeypatch):
+    # The debounce timer needs a running mainloop, so quit has to flush. It
+    # also has to do so BEFORE destroy(), which is what makes this worth a
+    # test: _save_now reads the geometry off the live window.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("533x341+77+88")
+        ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        expected_font = ov._font_size
+
+        ov.ui_queue.put(("quit", None))
+        ov._drain()
+    finally:
+        try:
+            ov.root.destroy()
+        except Exception:
+            pass          # the quit path already destroyed it
+
+    saved = uistate.load()
+    assert (saved.w, saved.h) == (533, 341), f"geometry not saved: {saved}"
+    assert (saved.x, saved.y) == (77, 88)
+    assert saved.font_size == expected_font
+
+
+def test_a_wheel_change_schedules_exactly_one_save(monkeypatch):
+    # Debounced, not per event. A spun wheel is a burst; writing the file on
+    # every notch would be hundreds of writes to change one number.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        for _ in range(12):
+            ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+
+        assert ov._save_job is not None, "no save was scheduled"
+        # One pending job, not twelve: each notch cancels the previous.
+        pending = [j for j in ov.root.tk.call("after", "info")]
+        assert len(pending) < 12, f"{len(pending)} timers queued for 12 notches"
+    finally:
+        ov.root.destroy()
+
+
+def test_saving_survives_an_unwritable_location(monkeypatch):
+    # Quit must not become a crash because the disk is full or the path is
+    # locked. The overlay is mid-teardown by then.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        monkeypatch.setattr(
+            uistate, "save", lambda _s: (_ for _ in ()).throw(OSError("nope"))
+        )
+        with pytest.raises(OSError):
+            uistate.save(uistate.DEFAULT)   # the patch really is in force
+
+        blew_up = []
+        ov.root.report_callback_exception = lambda *a: blew_up.append(a)
+        ov.ui_queue.put(("quit", None))
+        ov._drain()                          # must not propagate
+        assert not blew_up
+    finally:
+        try:
+            ov.root.destroy()
+        except Exception:
+            pass
 
 
 def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):

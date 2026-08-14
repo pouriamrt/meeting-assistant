@@ -7,7 +7,7 @@ import tkinter as tk
 from collections.abc import Callable
 from ctypes import wintypes
 
-from . import config
+from . import config, uistate
 
 log = logging.getLogger(__name__)
 
@@ -30,19 +30,35 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011
 _BG = "#101014"
 _FG = "#e8e8ea"
 _FONT_FAMILY = "Segoe UI"
-_FONT_SIZE = 12             # starting size only; Ctrl+wheel moves it at runtime
 
 _GRIP = "#2a2a32"           # just visible against _BG, not attention-grabbing
 _GRIP_PX = 16
 _DRAG_BAR_PX = 18           # the only surface that moves the window, so the
                             # text body underneath stays selectable
-_MIN_W, _MIN_H = 240, 120   # below this the text is unreadable and the grip
-                            # gets hard to hit, leaving no way to grow it back
-_FONT_MIN, _FONT_MAX = 8, 32
-# The floor is not cosmetic: overrideredirect(True) leaves no titlebar and no
-# frame, so an overlay faded to 0 is gone with nothing left to grab it by.
-_ALPHA_MIN, _ALPHA_MAX = 0.25, 1.0
+
+# The live input clamps come from uistate, which also applies them to whatever
+# is read off disk. One definition, so a saved file cannot restore a value the
+# wheel and the grip have no way to move back. The alpha floor in particular is
+# not cosmetic: overrideredirect(True) leaves no titlebar and no frame, so an
+# overlay faded to 0 is gone with nothing left to grab it by.
+_MIN_W, _MIN_H = uistate.MIN_W, uistate.MIN_H
+_FONT_MIN, _FONT_MAX = uistate.FONT_MIN, uistate.FONT_MAX
+_ALPHA_MIN, _ALPHA_MAX = uistate.ALPHA_MIN, uistate.ALPHA_MAX
 _ALPHA_STEP = 0.05
+
+_SAVE_DEBOUNCE_MS = 800     # a wheel notch or a drag arrives in bursts; write
+                            # once the burst stops rather than per event
+
+
+def _scale_rect(
+    rect: tuple[int, int, int, int], scale: float
+) -> tuple[int, int, int, int]:
+    """Convert a monitor rect between physical and Tk pixels."""
+    left, top, right, bottom = rect
+    return (
+        round(left * scale), round(top * scale),
+        round(right * scale), round(bottom * scale),
+    )
 
 
 def set_capture_excluded(root: tk.Tk, excluded: bool) -> None:
@@ -67,7 +83,13 @@ class Overlay:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=_BG)
-        self.root.geometry("460x300+40+40")
+        # Clamped against the desktop this run actually has, not the one it was
+        # saved on. A monitor that has since been unplugged would otherwise put
+        # a borderless window somewhere no mouse can reach.
+        self._state = uistate.load().clamped(self._desktop())
+        self.root.geometry(
+            f"{self._state.w}x{self._state.h}+{self._state.x}+{self._state.y}"
+        )
 
         # Packed before self.text so it claims the top strip; self.text then
         # takes the rest with expand/fill.
@@ -83,7 +105,7 @@ class Overlay:
             self.root,
             bg=_BG,
             fg=_FG,
-            font=(_FONT_FAMILY, _FONT_SIZE),
+            font=(_FONT_FAMILY, self._state.font_size),
             wrap="word",
             borderwidth=0,
             highlightthickness=0,
@@ -108,8 +130,9 @@ class Overlay:
         # After _entry: _apply_font reads it, and binding the handler before
         # the attribute exists leaves a window - narrow, but the kind that
         # only shows up as an AttributeError on a keystroke.
-        self._font_size = _FONT_SIZE
-        self._alpha = _ALPHA_MAX
+        self._font_size = self._state.font_size
+        self._alpha = self._state.alpha
+        self._save_job: str | None = None
         self._resize_from: tuple[int, int, int, int] | None = None
         self._grip = self._make_resizable()
         self._make_font_scalable()
@@ -131,6 +154,63 @@ class Overlay:
         # without the mainloop running.
         self._apply_exclusion_then_show()
         self.root.after(50, self._drain)
+
+    def _desktop(self) -> tuple[int, int, int, int]:
+        """The union of every monitor, in the units Tk positions windows with.
+
+        mss reports the virtual desktop in monitors[0], including screens left
+        of or above the primary, which have negative origins. Tk's own
+        winfo_screenwidth describes the primary monitor only, so it is the
+        fallback rather than the first choice: on a two-screen setup it would
+        call a perfectly good position off-screen and drag the window back.
+
+        The catch is that the two disagree about what a pixel is. mss reports
+        physical pixels while Tk here is DPI-unaware and works in scaled ones,
+        so a 1920-wide screen at 125% is 1536 to Tk. Measured on this machine.
+        Clamping in mss units and handing the result to geometry() would place
+        the window a quarter of a screen too far right, which is the exact
+        failure the clamp exists to prevent, so convert before returning.
+        """
+        try:
+            import mss
+
+            with mss.MSS() as sct:
+                union, primary = sct.monitors[0], sct.monitors[1]
+            scale = self.root.winfo_screenwidth() / primary["width"]
+            rect = (union["left"], union["top"],
+                    union["left"] + union["width"],
+                    union["top"] + union["height"])
+            return _scale_rect(rect, scale)
+        except (OSError, KeyError, IndexError, ZeroDivisionError, ImportError):
+            log.warning("could not read the monitor layout", exc_info=True)
+            return (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight())
+
+    def _schedule_save(self) -> None:
+        """Save once a burst of changes stops.
+
+        A drag or a spun wheel arrives as a stream of events, and writing per
+        event would mean hundreds of file writes to move one window. Saving
+        only on quit was the other option and it is worse: it loses the setting
+        exactly when the app did not exit cleanly.
+        """
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+        self._save_job = self.root.after(_SAVE_DEBOUNCE_MS, self._save_now)
+
+    def _save_now(self) -> None:
+        self._save_job = None
+        # Geometry is read back off the window rather than tracked alongside
+        # it, so what gets stored is where the window actually ended up.
+        self._state = uistate.UiState(
+            w=self.root.winfo_width(),
+            h=self.root.winfo_height(),
+            x=self.root.winfo_x(),
+            y=self.root.winfo_y(),
+            font_size=self._font_size,
+            alpha=self._alpha,
+        )
+        uistate.save(self._state)
 
     def _apply_exclusion_then_show(self) -> None:
         self.root.update_idletasks()   # force the HWND into existence
@@ -168,6 +248,7 @@ class Overlay:
 
         def drop(_event: "tk.Event") -> None:
             self._drag_from = None
+            self._schedule_save()
 
         widget.bind("<Button-1>", grab)
         widget.bind("<B1-Motion>", drag)
@@ -253,6 +334,7 @@ class Overlay:
 
         def drop(_event: "tk.Event") -> str:
             self._resize_from = None
+            self._schedule_save()
             return "break"
 
         grip.bind("<Button-1>", grab)
@@ -270,6 +352,7 @@ class Overlay:
                 _FONT_MIN, min(_FONT_MAX, self._font_size + step)
             )
             self._apply_font()
+            self._schedule_save()
             return "break"   # otherwise the Text scrolls as well
 
         for widget in (self.root, self.text):
@@ -284,6 +367,7 @@ class Overlay:
                 _ALPHA_MIN, min(_ALPHA_MAX, self._alpha + step)
             )
             self._apply_alpha()
+            self._schedule_save()
             return "break"   # Shift+wheel scrolls a Text sideways otherwise
 
         for widget in (self.root, self.text):
@@ -413,6 +497,9 @@ class Overlay:
                         self.toggle_visible()
                     elif kind == "quit":
                         self._alive = False
+                        # Before destroy(): _save_now reads the geometry off
+                        # the live window, and a destroyed one has none.
+                        self._save_now()
                         self.root.destroy()
                         return
                     elif kind != "done":
