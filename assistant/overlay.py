@@ -39,6 +39,10 @@ _DRAG_BAR_PX = 18           # the only surface that moves the window, so the
 _MIN_W, _MIN_H = 240, 120   # below this the text is unreadable and the grip
                             # gets hard to hit, leaving no way to grow it back
 _FONT_MIN, _FONT_MAX = 8, 32
+# The floor is not cosmetic: overrideredirect(True) leaves no titlebar and no
+# frame, so an overlay faded to 0 is gone with nothing left to grab it by.
+_ALPHA_MIN, _ALPHA_MAX = 0.25, 1.0
+_ALPHA_STEP = 0.05
 
 
 def set_capture_excluded(root: tk.Tk, excluded: bool) -> None:
@@ -105,9 +109,11 @@ class Overlay:
         # the attribute exists leaves a window - narrow, but the kind that
         # only shows up as an AttributeError on a keystroke.
         self._font_size = _FONT_SIZE
+        self._alpha = _ALPHA_MAX
         self._resize_from: tuple[int, int, int, int] | None = None
         self._grip = self._make_resizable()
         self._make_font_scalable()
+        self._make_transparency_scalable()
         # Fully transparent until exclusion is confirmed. The window has to be
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
@@ -137,7 +143,7 @@ class Overlay:
                     "Screen-capture exclusion failed; refusing to show the "
                     "overlay unprotected. Needs Windows 10 build 19041+."
                 ) from exc
-        self.root.attributes("-alpha", 1.0)
+        self._apply_alpha()
 
     def _make_draggable(self, widget: tk.Misc) -> None:
         """Drag the window by its body.
@@ -268,6 +274,31 @@ class Overlay:
 
         for widget in (self.root, self.text):
             widget.bind("<Control-MouseWheel>", scale)
+
+    def _make_transparency_scalable(self) -> None:
+        """Shift+wheel fades the window, so what is behind it stays readable."""
+
+        def scale(event: "tk.Event") -> str:
+            step = _ALPHA_STEP if event.delta > 0 else -_ALPHA_STEP
+            self._alpha = max(
+                _ALPHA_MIN, min(_ALPHA_MAX, self._alpha + step)
+            )
+            self._apply_alpha()
+            return "break"   # Shift+wheel scrolls a Text sideways otherwise
+
+        for widget in (self.root, self.text):
+            widget.bind("<Shift-MouseWheel>", scale)
+
+    def _apply_alpha(self) -> None:
+        """Push the chosen opacity onto the window, unless it is hidden.
+
+        Hiding is itself an alpha write (see toggle_visible), so the two share
+        one channel and the hidden state has to win: a stray Shift+wheel while
+        the overlay is hidden must not paint it back onto a screen share. The
+        setting is still stored, and toggle_visible replays it on the way back.
+        """
+        if self._visible:
+            self.root.attributes("-alpha", self._alpha)
 
     def _apply_font(self) -> None:
         """Push the current size onto every widget that shows text.
@@ -430,9 +461,13 @@ class Overlay:
         # HWND on remap, and display affinity lives on the HWND. Hiding must
         # not be able to silently drop capture exclusion.
         self._visible = not self._visible
-        self.root.attributes("-alpha", 1.0 if self._visible else 0.0)
         if self._visible:
+            # self._alpha, not 1.0: showing must replay whatever Shift+wheel
+            # was set to, or hiding quietly discards the user's choice.
+            self._apply_alpha()
             self._raise()
+        else:
+            self.root.attributes("-alpha", 0.0)
 
     def run(self) -> None:
         self.root.mainloop()

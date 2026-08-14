@@ -1500,6 +1500,127 @@ def test_font_scaling_keeps_the_hwnd(monkeypatch):
         ov.root.destroy()
 
 
+def test_shift_wheel_changes_the_opacity_both_ways(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        start = ov._alpha
+
+        ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        # Asserted while faded, not after scrolling back: checking only the
+        # restored value passes on code that never moved in the first place.
+        assert ov._alpha < start, "scroll down did not fade the overlay"
+        assert float(ov.root.attributes("-alpha")) == pytest.approx(ov._alpha), (
+            "the counter moved but the window kept its old alpha"
+        )
+
+        ov.text.event_generate("<Shift-MouseWheel>", delta=120)
+        ov.root.update()
+        assert ov._alpha == pytest.approx(start), "scroll up did not restore it"
+        assert float(ov.root.attributes("-alpha")) == pytest.approx(start)
+    finally:
+        ov.root.destroy()
+
+
+def test_opacity_is_clamped_at_both_ends(monkeypatch):
+    # The floor is the load-bearing half. An overrideredirect window at alpha 0
+    # has no titlebar to find and no frame to click, so an unclamped fade is a
+    # one-way trip out of the UI.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        for _ in range(80):
+            ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert ov._alpha == pytest.approx(overlay_mod._ALPHA_MIN)
+        assert overlay_mod._ALPHA_MIN > 0.0, "a zero floor is an invisible window"
+
+        for _ in range(160):
+            ov.text.event_generate("<Shift-MouseWheel>", delta=120)
+        ov.root.update()
+        assert ov._alpha == pytest.approx(overlay_mod._ALPHA_MAX)
+    finally:
+        ov.root.destroy()
+
+
+def test_hiding_and_showing_preserves_the_chosen_opacity(monkeypatch):
+    # toggle_visible drives the same -alpha the user is now setting. Restoring
+    # a hard-coded 1.0 on show would silently throw the setting away.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        for _ in range(4):
+            ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        chosen = ov._alpha
+        assert chosen < 1.0, "the fade never took effect, so the test proves nothing"
+
+        ov.toggle_visible()          # hide
+        ov.root.update()
+        assert float(ov.root.attributes("-alpha")) == 0.0, "hiding must be fully clear"
+
+        ov.toggle_visible()          # show
+        ov.root.update()
+        assert ov._alpha == pytest.approx(chosen)
+        assert float(ov.root.attributes("-alpha")) == pytest.approx(chosen), (
+            "showing reset the opacity instead of restoring it"
+        )
+    finally:
+        ov.root.destroy()
+
+
+def test_fading_while_hidden_does_not_reveal_the_overlay(monkeypatch):
+    # Ctrl+Alt+H hides it; a stray Shift+wheel must not paint it back onto a
+    # screen share. The setting is stored, the window stays clear.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        ov.toggle_visible()          # hide
+        ov.root.update()
+
+        ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert float(ov.root.attributes("-alpha")) == 0.0, (
+            "adjusting opacity un-hid the overlay"
+        )
+        assert ov._alpha < 1.0, "the adjustment was dropped instead of stored"
+    finally:
+        ov.root.destroy()
+
+
+def test_opacity_scaling_keeps_the_hwnd(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        before = ov.root.winfo_id()
+        for _ in range(6):
+            ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert ov.root.winfo_id() == before, "HWND changed - exclusion would drop"
+    finally:
+        ov.root.destroy()
+
+
+def test_shift_wheel_does_not_also_scroll_the_text(monkeypatch):
+    # Shift+wheel is horizontal scroll on a Text by default. Without "break"
+    # the view slides sideways every time the opacity is nudged.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        ov.text.configure(wrap="none")
+        ov._write("x" * 4000 + "\n")
+        ov.root.update()
+        before = ov.text.xview()
+
+        for _ in range(5):
+            ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert ov.text.xview() == before, f"the text scrolled sideways: {before}"
+    finally:
+        ov.root.destroy()
+
+
 def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
     # overrideredirect(True) means no titlebar and no window manager to move
     # the window, so dragging is hand-rolled. It must move by the drag delta -

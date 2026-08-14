@@ -36,6 +36,7 @@ Missing `ANTHROPIC_API_KEY` will fail immediately on startup with a clear error.
 | drag the top bar | Move it — the strip along the top, there is no titlebar |
 | drag the corner grip | Resize it — the small square, bottom right |
 | `Ctrl` + scroll wheel | Bigger or smaller text, 8pt to 32pt |
+| `Shift` + scroll wheel | See through it — fades to 25%, never further |
 | drag across the text | Select it. `Ctrl+C` copies |
 | `Ctrl+Alt+Q` | Quit |
 
