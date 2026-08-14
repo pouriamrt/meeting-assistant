@@ -23,15 +23,22 @@ MAX_TURNS = 400
 # False to debug the overlay — with exclusion on you cannot screenshot it.
 EXCLUDE_FROM_CAPTURE = True
 
-# Send screenshots at half resolution. Measured on this machine, one 1536x864
-# monitor: TTFT 2.37s -> 2.03s, total 9.24s -> 8.09s, input 2859 -> 868 tokens
-# (about $0.010 a press). Legibility was tested rather than assumed — at half
-# resolution the model still transcribed a 14pt IDE-font stub correctly, one
-# hyphen aside. Set False if a real interview pad ever reads worse.
+# Send screenshots at half resolution.
 #
-# Do not expect much more than this: output dominates the wall clock. Screen
-# answers run ~400 tokens at roughly 50 tok/s, so most of those 8 seconds is
-# generation, not the image.
+# This is a COST saving, not a speed fix. Controlled A/B on one 1536x864
+# monitor, same question, four runs each alternating: input 2847 -> 856 tokens
+# (about $0.010 a press, deterministic), TTFT median 2.05s -> 1.80s, total
+# median 3.43s -> 3.34s. The totals overlap run to run — one full-res run came
+# back faster than both half-res runs — so treat the wall-clock difference as
+# noise and the token difference as real.
+#
+# An earlier "9.2s -> 4.3s" figure was wrong: it compared two different
+# questions with different answer lengths, not the same one at two
+# resolutions.
+#
+# Legibility was tested rather than assumed — at half resolution the model
+# still transcribed a 14pt IDE-font stub correctly, one hyphen aside. Set
+# False if a real interview pad ever reads worse.
 SCREEN_HALF_RES = True
 
 # Fast mode is a research preview and needs the org to be allowlisted for it.

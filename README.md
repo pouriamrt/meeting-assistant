@@ -60,16 +60,23 @@ It answers under a second system prompt that writes real code instead of the
 spoken cue cards `Ctrl+Space` produces. On a diagram or a dashboard it falls
 back to bullets on its own.
 
-Screenshots go at half resolution (`SCREEN_HALF_RES`). Measured, one monitor at
-1536x864: input drops 2859 → 868 tokens, TTFT 2.37s → 2.03s, and a full answer
-came back in 4.3s against 9.2s at full resolution. Legibility was tested rather
-than assumed — at half resolution the model still transcribed a 14pt IDE-font
-stub correctly. Set it `False` if a real pad ever reads worse.
+Screenshots go at half resolution (`SCREEN_HALF_RES`). **This saves money, not
+time.** Controlled A/B on one 1536x864 monitor, same question, four runs each:
 
-Do not expect much more: **output dominates the wall clock.** A screen answer
-runs a few hundred tokens at roughly 50 tok/s, so most of the time is
-generation, not the image. The one large lever is `FAST_MODE`, and that needs
-an entitlement this account does not have.
+| | input tokens | TTFT (median) | total (median) |
+|---|---|---|---|
+| full res | 2847 | 2.05s | 3.43s |
+| half res | 856 | 1.80s | 3.34s |
+
+The token drop is deterministic and worth about $0.010 a press. The wall-clock
+difference is not: the totals overlap run to run, and one full-res run came
+back faster than both half-res runs. Legibility was tested rather than assumed
+— at half resolution the model still transcribed a 14pt IDE-font stub
+correctly. Set it `False` if a real pad ever reads worse.
+
+There is **no large speed win available here.** Output dominates, a screen
+answer is typically 3-4 seconds end to end, and the one real lever is
+`FAST_MODE` — which needs an entitlement this account does not have.
 
 Monitors are sent as one image each, never stitched into one wide picture.
 Two 1920-wide screens stitched are 3840 across, and the API scales anything
