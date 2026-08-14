@@ -225,7 +225,7 @@ content to `SYSTEM` rather than trimming it.
 
 ## 9. End to end, against a real conversation
 
-**11 of these 13 are scripted.** Only 3 and 6 need a person; both are marked below.
+**13 of these 15 are scripted.** Only 3 and 6 need a person; both are marked below.
 
 A YouTube interview through the speakers works for a solo test.
 
@@ -262,8 +262,17 @@ Check each:
     the overlay out of the screenshot; if it ever stops covering this path the
     model starts reading its own last answer back as input, and the only sign is
     an answer that quietly drifts off-topic.
-12. `Ctrl+Alt+H` hides and shows.
-13. `Ctrl+Alt+Q` exits cleanly, with no audio device left open.
+12. **A buried overlay comes back.** Scripted, and worth re-running after any
+    change to `_raise` or to window creation. Put a topmost window over it,
+    sample a pixel inside both, call `_raise()`, sample again — `#101014`
+    (`_BG`) means the overlay is back on top. The burial half is the control:
+    without it, "the pixel is the overlay" proves nothing, because it was
+    never covered. Verified 2026-08-14: covered `(136,51,51)`, recovered
+    `(16,16,20)`.
+13. **Select text and press `Ctrl+C`.** Drag across the body — it must select,
+    not move the window. Only the top bar moves it.
+14. `Ctrl+Alt+H` hides and shows.
+15. `Ctrl+Alt+Q` exits cleanly, with no audio device left open.
 
 ---
 
