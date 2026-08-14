@@ -107,7 +107,7 @@ def _install_hotkeys(
 
     def start_answer(
         tail: str,
-        images: "Sequence[bytes]" = (),
+        images: Sequence[bytes] = (),
         system: str | None = None,
     ) -> None:
         gen_queue = answer_gate.start(ui_queue)
@@ -125,12 +125,18 @@ def _install_hotkeys(
 
         threading.Thread(target=run, daemon=True).start()
 
+    def status(message: str) -> None:
+        """Show one line instead of an answer.
+
+        Routed through the gate rather than straight onto the queue: this
+        counts as "a press" too, and must supersede whatever a previous press
+        is still streaming rather than be written over by it.
+        """
+        answer_gate.start(ui_queue).put(("status", message))
+
     def on_last_question() -> None:
         if len(transcript) == 0:
-            # Routed through the gate too: this also counts as "a press", and
-            # must supersede whatever a previous press is still streaming
-            # rather than write over it directly.
-            answer_gate.start(ui_queue).put(("status", "nothing transcribed yet"))
+            status("nothing transcribed yet")
             return
         start_answer(prompts.last_question_tail())
 
@@ -146,18 +152,17 @@ def _install_hotkeys(
     def on_screen() -> None:
         # Grabbed here, on pynput's thread, rather than inside the answer
         # thread: the screenshot must be of what was on screen when the key
-        # went down. Costs the listener ~200ms of PNG encoding, which is
-        # invisible unless two hotkeys are pressed inside that window.
+        # went down. Measured at 80-140ms for one 1536x864 monitor, nearly all
+        # of it PNG encoding - invisible unless a second hotkey is pressed
+        # inside that window.
         try:
             images = screen.grab()
         except Exception:
-            # Routed through the gate like every other press so it supersedes
-            # a still-streaming answer instead of being written over by it.
             log.exception("screen grab failed")
-            answer_gate.start(ui_queue).put(("status", "screen grab failed"))
+            status("screen grab failed")
             return
         if not images:
-            answer_gate.start(ui_queue).put(("status", "no monitor to capture"))
+            status("no monitor to capture")
             return
         start_answer(prompts.screen_tail(), images, prompts.CODE_SYSTEM)
 

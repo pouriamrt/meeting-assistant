@@ -189,8 +189,22 @@ Check each:
 7. Press `Ctrl+Space` twice a second apart. The second answer must replace the first
    cleanly, not interleave with it.
 8. A second press logs `cache_read=` above 0.
-9. `Ctrl+Alt+H` hides and shows.
-10. `Ctrl+Alt+Q` exits cleanly, with no audio device left open.
+9. **`Ctrl+Alt+Space` with code visible on screen.** The answer must be real code,
+   not bullets — that is the whole reason screen mode has its own system prompt.
+   A second press logs `cache_read=` above 0 for that prompt too; both prefixes
+   are cached separately.
+10. **Both inputs actually reach the model.** Say a constraint out loud that
+    appears nowhere on screen — "don't use any imports" — then press
+    `Ctrl+Alt+Space` on a coding prompt. The answer must honour it. If it does
+    not, the transcript is not riding along and the screenshot is being sent
+    alone.
+11. **Press `Ctrl+Alt+Space` while an earlier answer is still on the overlay.**
+    The new answer must not react to that text. Capture exclusion is what keeps
+    the overlay out of the screenshot; if it ever stops covering this path the
+    model starts reading its own last answer back as input, and the only sign is
+    an answer that quietly drifts off-topic.
+12. `Ctrl+Alt+H` hides and shows.
+13. `Ctrl+Alt+Q` exits cleanly, with no audio device left open.
 
 ---
 
