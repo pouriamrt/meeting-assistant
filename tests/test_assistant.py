@@ -1107,17 +1107,13 @@ def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
     # nothing. Nothing in the suite checked that a widget was displayed, only
     # that it existed, so this shipped through every review.
     import queue as _queue
-    import tkinter as _tk
 
     from assistant import config as _config
 
     monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
     from assistant.overlay import Overlay
 
-    try:
-        ov = Overlay(_queue.Queue())
-    except _tk.TclError as exc:            # no display available
-        pytest.skip(f"tk unavailable: {exc}")
+    ov = _tk_root_or_skip(lambda: Overlay(_queue.Queue()))
 
     try:
         ov.root.attributes("-alpha", 0.0)
@@ -1139,19 +1135,52 @@ def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
 def _live_overlay(monkeypatch):
     """A real Overlay with capture exclusion off, or skip if there is no display."""
     import queue as _queue
-    import tkinter as _tk
 
     from assistant import config as _config
 
     monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
     from assistant.overlay import Overlay
 
-    try:
-        ov = Overlay(_queue.Queue())
-    except _tk.TclError as exc:
-        pytest.skip(f"tk unavailable: {exc}")
+    ov = _tk_root_or_skip(lambda: Overlay(_queue.Queue()))
     ov.root.attributes("-alpha", 0.0)
     return ov
+
+
+def _tk_root_or_skip(build):
+    """Build a Tk-owning object, retrying once, or skip if Tk is really absent.
+
+    Creating and tearing down this many Tk roots in one process intermittently
+    fails to resolve the Tcl library - measured at roughly half of all suite
+    runs, on a different test each time, and under at least four different
+    messages ("Can't find a usable init.tcl" with an EMPTY directory list,
+    "Can't find a usable tk.tcl", 'invalid command name "tcl_findLibrary"',
+    and a missing auto.tcl). Matching on the wording missed half of them, so
+    any TclError is retried.
+
+    The blanket skip this replaces turned a transient failure into a silently
+    missing test, which is the one thing a green suite must never mean. A
+    second attempt has always succeeded; failing twice is a real broken
+    environment and still skips.
+    """
+    import tkinter as _tk
+
+    try:
+        return build()
+    except _tk.TclError:
+        # A failure partway through construction leaves a live root behind:
+        # tk.Tk() succeeded, something after it did not. Leaking one into the
+        # retry is how a flake becomes a cascade, since the whole problem here
+        # is too many roots in one process.
+        stray = getattr(_tk, "_default_root", None)
+        if stray is not None:
+            try:
+                stray.destroy()
+            except _tk.TclError:
+                pass
+        try:
+            return build()
+        except _tk.TclError as again:
+            pytest.skip(f"tk unavailable twice: {again}")
 
 
 def _spy_on_raising(ov):
@@ -1487,13 +1516,20 @@ def test_an_already_open_query_entry_scales_too(monkeypatch):
         ov.root.destroy()
 
 
-def test_font_scaling_keeps_the_hwnd(monkeypatch):
+@pytest.mark.parametrize(
+    "sequence, delta",
+    [("<Control-MouseWheel>", 120), ("<Shift-MouseWheel>", -120)],
+)
+def test_wheel_gestures_keep_the_hwnd(monkeypatch, sequence, delta):
+    # Display affinity lives on the HWND, so any gesture that rebuilt the
+    # window - the obvious wrong way to implement hiding, and a plausible
+    # wrong way to implement fading - would silently drop capture exclusion.
     ov = _live_overlay(monkeypatch)
     try:
         ov.root.update()
         before = ov.root.winfo_id()
         for _ in range(6):
-            ov.text.event_generate("<Control-MouseWheel>", delta=120)
+            ov.text.event_generate(sequence, delta=delta)
         ov.root.update()
         assert ov.root.winfo_id() == before, "HWND changed - exclusion would drop"
     finally:
@@ -1511,6 +1547,12 @@ def test_shift_wheel_changes_the_opacity_both_ways(monkeypatch):
         # Asserted while faded, not after scrolling back: checking only the
         # restored value passes on code that never moved in the first place.
         assert ov._alpha < start, "scroll down did not fade the overlay"
+        # One notch is one step, not two. The handler is bound on the Text AND
+        # on the toplevel, and Tk runs widget -> class -> toplevel bindtags, so
+        # only the "break" keeps a single notch from being counted twice.
+        assert ov._alpha == pytest.approx(start - overlay_mod._ALPHA_STEP), (
+            "one wheel notch did not move exactly one step"
+        )
         assert float(ov.root.attributes("-alpha")) == pytest.approx(ov._alpha), (
             "the counter moved but the window kept its old alpha"
         )
@@ -1589,19 +1631,6 @@ def test_fading_while_hidden_does_not_reveal_the_overlay(monkeypatch):
         ov.root.destroy()
 
 
-def test_opacity_scaling_keeps_the_hwnd(monkeypatch):
-    ov = _live_overlay(monkeypatch)
-    try:
-        ov.root.update()
-        before = ov.root.winfo_id()
-        for _ in range(6):
-            ov.text.event_generate("<Shift-MouseWheel>", delta=-120)
-        ov.root.update()
-        assert ov.root.winfo_id() == before, "HWND changed - exclusion would drop"
-    finally:
-        ov.root.destroy()
-
-
 def test_shift_wheel_does_not_also_scroll_the_text(monkeypatch):
     # Shift+wheel is horizontal scroll on a Text by default. Without "break"
     # the view slides sideways every time the opacity is nudged.
@@ -1628,17 +1657,13 @@ def test_overlay_can_be_dragged_and_keeps_its_hwnd(monkeypatch):
     # without recreating the toplevel: display affinity lives on the HWND, so
     # a new HWND would silently drop capture exclusion mid-drag.
     import queue as _queue
-    import tkinter as _tk
 
     from assistant import config as _config
 
     monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
     from assistant.overlay import Overlay
 
-    try:
-        ov = Overlay(_queue.Queue())
-    except _tk.TclError as exc:
-        pytest.skip(f"tk unavailable: {exc}")
+    ov = _tk_root_or_skip(lambda: Overlay(_queue.Queue()))
 
     try:
         ov.root.attributes("-alpha", 0.0)

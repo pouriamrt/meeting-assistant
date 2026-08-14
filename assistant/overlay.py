@@ -113,7 +113,7 @@ class Overlay:
         self._resize_from: tuple[int, int, int, int] | None = None
         self._grip = self._make_resizable()
         self._make_font_scalable()
-        self._make_transparency_scalable()
+        self._make_opacity_scalable()
         # Fully transparent until exclusion is confirmed. The window has to be
         # mapped before it has an HWND, so it cannot simply stay withdrawn —
         # alpha 0 gets it mapped without ever painting a visible frame.
@@ -275,7 +275,7 @@ class Overlay:
         for widget in (self.root, self.text):
             widget.bind("<Control-MouseWheel>", scale)
 
-    def _make_transparency_scalable(self) -> None:
+    def _make_opacity_scalable(self) -> None:
         """Shift+wheel fades the window, so what is behind it stays readable."""
 
         def scale(event: "tk.Event") -> str:
@@ -290,15 +290,17 @@ class Overlay:
             widget.bind("<Shift-MouseWheel>", scale)
 
     def _apply_alpha(self) -> None:
-        """Push the chosen opacity onto the window, unless it is hidden.
+        """The only place that writes -alpha once the overlay is running.
 
-        Hiding is itself an alpha write (see toggle_visible), so the two share
-        one channel and the hidden state has to win: a stray Shift+wheel while
-        the overlay is hidden must not paint it back onto a screen share. The
-        setting is still stored, and toggle_visible replays it on the way back.
+        Opacity and hiding share one channel, so one function owns it and
+        hidden always wins: a stray Shift+wheel while the overlay is hidden
+        must not paint it back onto the monitor. Not a capture concern - with
+        EXCLUDE_FROM_CAPTURE on, the window is already absent from any share -
+        but Ctrl+Alt+H is also what you press when someone walks up behind you,
+        and that only works if nothing else can undo it. The chosen value is
+        still stored, and shows up again on the way back.
         """
-        if self._visible:
-            self.root.attributes("-alpha", self._alpha)
+        self.root.attributes("-alpha", self._alpha if self._visible else 0.0)
 
     def _apply_font(self) -> None:
         """Push the current size onto every widget that shows text.
@@ -461,13 +463,11 @@ class Overlay:
         # HWND on remap, and display affinity lives on the HWND. Hiding must
         # not be able to silently drop capture exclusion.
         self._visible = not self._visible
+        # _apply_alpha, not a literal: showing must replay whatever Shift+wheel
+        # was set to, or hiding quietly discards the user's choice.
+        self._apply_alpha()
         if self._visible:
-            # self._alpha, not 1.0: showing must replay whatever Shift+wheel
-            # was set to, or hiding quietly discards the user's choice.
-            self._apply_alpha()
             self._raise()
-        else:
-            self.root.attributes("-alpha", 0.0)
 
     def run(self) -> None:
         self.root.mainloop()
