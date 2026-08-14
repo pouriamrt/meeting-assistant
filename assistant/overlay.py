@@ -86,7 +86,7 @@ class Overlay:
         # Clamped against the desktop this run actually has, not the one it was
         # saved on. A monitor that has since been unplugged would otherwise put
         # a borderless window somewhere no mouse can reach.
-        self._state = uistate.load().clamped(self._desktop())
+        self._state = uistate.load().clamped(self._monitors())
         self.root.geometry(
             f"{self._state.w}x{self._state.h}+{self._state.x}+{self._state.y}"
         )
@@ -155,14 +155,16 @@ class Overlay:
         self._apply_exclusion_then_show()
         self.root.after(50, self._drain)
 
-    def _desktop(self) -> tuple[int, int, int, int]:
-        """The union of every monitor, in the units Tk positions windows with.
+    def _monitors(self) -> "list[uistate.Rect]":
+        """Every monitor separately, primary first, in Tk's units.
 
-        mss reports the virtual desktop in monitors[0], including screens left
-        of or above the primary, which have negative origins. Tk's own
-        winfo_screenwidth describes the primary monitor only, so it is the
-        fallback rather than the first choice: on a two-screen setup it would
-        call a perfectly good position off-screen and drag the window back.
+        Separately rather than as one bounding box: an L-shaped or diagonal
+        arrangement leaves dead space inside the box belonging to no screen,
+        and a window restored there passes a union check while sitting on
+        nothing. Tk's own winfo_screenwidth describes the primary only, so it
+        is the fallback rather than the first choice: on a two-screen setup it
+        would call a perfectly good position off-screen and drag the window
+        back.
 
         The catch is that the two disagree about what a pixel is. mss reports
         physical pixels while Tk here is DPI-unaware and works in scaled ones,
@@ -170,21 +172,45 @@ class Overlay:
         Clamping in mss units and handing the result to geometry() would place
         the window a quarter of a screen too far right, which is the exact
         failure the clamp exists to prevent, so convert before returning.
+
+        Ceiling: the primary monitor's ratio is applied to the whole union, so
+        a setup running two monitors at different scale factors clamps the
+        secondary one imprecisely. Still lands on screen, just not exactly
+        where a per-monitor calculation would put it.
         """
         try:
             import mss
 
             with mss.MSS() as sct:
-                union, primary = sct.monitors[0], sct.monitors[1]
+                # sct.primary_monitor, not monitors[1]. Index 1 is just the
+                # first in EnumDisplayMonitors order, which is not the primary
+                # on every layout, and the scale has to come from the monitor
+                # Tk's winfo_screenwidth is actually describing. Getting that
+                # wrong yields scale 1.0 on a scaled display, which hands the
+                # clamp physical pixels and lets a saved position land on no
+                # screen at all: the failure the clamp exists to prevent.
+                primary = sct.primary_monitor
+                screens = [m for m in sct.monitors[1:]]
+                ordered = ([primary] + [m for m in screens if m is not primary]
+                           if primary in screens else [primary, *screens])
             scale = self.root.winfo_screenwidth() / primary["width"]
-            rect = (union["left"], union["top"],
-                    union["left"] + union["width"],
-                    union["top"] + union["height"])
-            return _scale_rect(rect, scale)
-        except (OSError, KeyError, IndexError, ZeroDivisionError, ImportError):
+            return [
+                _scale_rect(
+                    (m["left"], m["top"],
+                     m["left"] + m["width"], m["top"] + m["height"]),
+                    scale,
+                )
+                for m in ordered
+            ]
+        except Exception:
+            # Broad on purpose: mss.exception.ScreenShotError subclasses
+            # Exception, not OSError, so a narrow tuple leaves this fallback
+            # unreachable for the library it exists to guard. Any failure to
+            # read the layout means the same thing here, fall back to the
+            # primary screen rather than let it reach the caller.
             log.warning("could not read the monitor layout", exc_info=True)
-            return (0, 0, self.root.winfo_screenwidth(),
-                    self.root.winfo_screenheight())
+            return [(0, 0, self.root.winfo_screenwidth(),
+                     self.root.winfo_screenheight())]
 
     def _schedule_save(self) -> None:
         """Save once a burst of changes stops.
@@ -202,15 +228,14 @@ class Overlay:
         self._save_job = None
         # Geometry is read back off the window rather than tracked alongside
         # it, so what gets stored is where the window actually ended up.
-        self._state = uistate.UiState(
+        uistate.save(uistate.UiState(
             w=self.root.winfo_width(),
             h=self.root.winfo_height(),
             x=self.root.winfo_x(),
             y=self.root.winfo_y(),
             font_size=self._font_size,
             alpha=self._alpha,
-        )
-        uistate.save(self._state)
+        ))
 
     def _apply_exclusion_then_show(self) -> None:
         self.root.update_idletasks()   # force the HWND into existence
@@ -497,10 +522,16 @@ class Overlay:
                         self.toggle_visible()
                     elif kind == "quit":
                         self._alive = False
-                        # Before destroy(): _save_now reads the geometry off
-                        # the live window, and a destroyed one has none.
-                        self._save_now()
-                        self.root.destroy()
+                        try:
+                            # Before destroy(): _save_now reads the geometry
+                            # off the live window, and a destroyed one has
+                            # none.
+                            self._save_now()
+                        finally:
+                            # In finally: _alive is already False, so a raise
+                            # that skipped destroy() would leave the window up
+                            # with the drain stopped, deaf to every hotkey.
+                            self.root.destroy()
                         return
                     elif kind != "done":
                         # "done" is deliberately unhandled here. Anything

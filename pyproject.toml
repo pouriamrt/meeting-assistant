@@ -28,6 +28,7 @@ packages = ["assistant"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.165.8",
     "pytest>=9.1.1",
 ]
 
