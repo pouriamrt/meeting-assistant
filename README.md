@@ -123,6 +123,11 @@ flowchart TB
     class MIC,SYS,RING,GATE,WHISP,TR,SHOT box
     class REQ,API away
     class OV out
+
+    %% Subgraphs need styling of their own; unstyled they render bright yellow
+    %% on GitHub, which fights every colour chosen above.
+    style local fill:#f7f9fb,stroke:#8fa6bd,color:#1a1a1a
+    style remote fill:#fdf6f6,stroke:#c0605d,color:#1a1a1a
 ```
 
 Two WASAPI streams run at once, your microphone and a loopback tap on the
