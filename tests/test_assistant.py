@@ -828,7 +828,18 @@ def _bare_overlay():
     ov.text = object()  # the entry packs relative to it; identity is all we need
     ov._entry = None
     ov._alive = False  # skip _drain's after() reschedule, no real Tk loop
+    # __new__ skips __init__, so anything __init__ establishes has to be set
+    # by hand. _open_query_entry reads this to size a lazily-created entry.
+    ov._font_size = overlay_mod._FONT[1]
     return ov
+
+
+def _font_size_of(widget) -> int:
+    """Tk's cget("font") returns a font SPEC STRING ("{Segoe UI} 12"), not the
+    tuple it was configured with, so indexing it walks characters."""
+    import tkinter.font as tkfont
+
+    return tkfont.Font(font=widget.cget("font")).cget("size")
 
 
 def test_prompt_message_opens_one_inline_entry_in_the_root(monkeypatch):
@@ -992,6 +1003,191 @@ def test_query_entry_is_actually_displayed_inside_the_root_window(monkeypatch):
         # The whole point of an inline entry: a Toplevel would be a second
         # HWND, and SetWindowDisplayAffinity is per-HWND and not inherited.
         assert entry.winfo_toplevel() is ov.root
+    finally:
+        ov.root.destroy()
+
+
+def _live_overlay(monkeypatch):
+    """A real Overlay with capture exclusion off, or skip if there is no display."""
+    import queue as _queue
+    import tkinter as _tk
+
+    from assistant import config as _config
+
+    monkeypatch.setattr(_config, "EXCLUDE_FROM_CAPTURE", False)
+    from assistant.overlay import Overlay
+
+    try:
+        ov = Overlay(_queue.Queue())
+    except _tk.TclError as exc:
+        pytest.skip(f"tk unavailable: {exc}")
+    ov.root.attributes("-alpha", 0.0)
+    return ov
+
+
+def test_grip_resizes_without_moving_the_window(monkeypatch):
+    # overrideredirect(True) removes the frame, so there is no resize border
+    # and no window manager to do the work - hand-rolled like the drag.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov.root.update()
+        hwnd_before = ov.root.winfo_id()
+
+        ov._grip.event_generate("<Button-1>", x=5, y=5, rootx=560, rooty=400)
+        ov.root.update()
+        ov._grip.event_generate("<B1-Motion>", rootx=660, rooty=480)
+        ov.root.update()
+
+        assert (ov.root.winfo_width(), ov.root.winfo_height()) == (560, 380), (
+            f"got {ov.root.winfo_width()}x{ov.root.winfo_height()}, want 560x380"
+        )
+        # Growing must not drag the window across the screen.
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (100, 100)
+        assert ov.root.winfo_id() == hwnd_before, "HWND changed - exclusion would drop"
+    finally:
+        ov.root.destroy()
+
+
+def test_grip_drag_does_not_also_move_the_window(monkeypatch):
+    # Tk runs bindtags widget -> class -> TOPLEVEL -> all, and <Button-1> is
+    # already bound on self.root for dragging. Without "break" on the grip
+    # handlers the window resizes AND slides at the same time. Measured: the
+    # handlers fired ['grip', 'root'] without it.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov.root.update()
+        ov._grip.event_generate("<Button-1>", x=5, y=5, rootx=560, rooty=400)
+        ov.root.update()
+        assert ov._drag_from is None, "the grip click reached the drag handler"
+    finally:
+        ov.root.destroy()
+
+
+def test_grip_will_not_shrink_the_window_into_uselessness(monkeypatch):
+    # Past the floor the text is unreadable and the grip itself gets hard to
+    # hit, which would leave no way to grow it back.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov.root.update()
+        ov._grip.event_generate("<Button-1>", x=5, y=5, rootx=560, rooty=400)
+        ov.root.update()
+        ov._grip.event_generate("<B1-Motion>", rootx=100, rooty=100)
+        ov.root.update()
+
+        assert ov.root.winfo_width() >= overlay_mod._MIN_W
+        assert ov.root.winfo_height() >= overlay_mod._MIN_H
+    finally:
+        ov.root.destroy()
+
+
+def test_dragging_the_body_still_moves_and_does_not_resize(monkeypatch):
+    # Regression: adding the grip must not turn a body drag into a resize.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.geometry("460x300+100+100")
+        ov.root.update()
+        ov.text.event_generate("<Button-1>", rootx=150, rooty=150)
+        ov.root.update()
+        ov.text.event_generate("<B1-Motion>", rootx=210, rooty=190)
+        ov.root.update()
+
+        assert (ov.root.winfo_x(), ov.root.winfo_y()) == (160, 140)
+        assert (ov.root.winfo_width(), ov.root.winfo_height()) == (460, 300)
+    finally:
+        ov.root.destroy()
+
+
+def test_ctrl_wheel_scales_the_font_both_ways(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        start = ov._font_size
+
+        ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        bigger = ov._font_size
+        # Checked HERE, while enlarged, not after scrolling back. Asserting
+        # only the restored state passes on code that never reconfigures the
+        # widget at all - it simply never left `start`. Caught by mutation.
+        assert bigger > start, "scroll up did not enlarge the font"
+        assert _font_size_of(ov.text) == bigger, (
+            "the counter moved but the widget kept its old font"
+        )
+
+        ov.text.event_generate("<Control-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert ov._font_size == start, "scroll down did not restore it"
+        assert _font_size_of(ov.text) == start
+    finally:
+        ov.root.destroy()
+
+
+def test_font_size_is_clamped_at_both_ends(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        for _ in range(80):
+            ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        assert ov._font_size == overlay_mod._FONT_MAX
+
+        for _ in range(160):
+            ov.text.event_generate("<Control-MouseWheel>", delta=-120)
+        ov.root.update()
+        assert ov._font_size == overlay_mod._FONT_MIN
+    finally:
+        ov.root.destroy()
+
+
+def test_a_query_entry_opened_after_scaling_uses_the_current_size(monkeypatch):
+    # The entry is created lazily and read `font=_FONT`, the module constant.
+    # Left alone it would open at 12pt beside 20pt body text.
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        for _ in range(5):
+            ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+
+        ov._open_query_entry(lambda _t: None)
+        ov.root.update()
+        assert ov._entry is not None
+        assert _font_size_of(ov._entry) == ov._font_size
+        assert _font_size_of(ov._entry) != overlay_mod._FONT[1], (
+            "entry fell back to the module constant"
+        )
+    finally:
+        ov.root.destroy()
+
+
+def test_an_already_open_query_entry_scales_too(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        ov._open_query_entry(lambda _t: None)
+        ov.root.update()
+
+        ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        assert ov._entry is not None
+        assert _font_size_of(ov._entry) == ov._font_size
+        assert _font_size_of(ov.text) == ov._font_size
+    finally:
+        ov.root.destroy()
+
+
+def test_font_scaling_keeps_the_hwnd(monkeypatch):
+    ov = _live_overlay(monkeypatch)
+    try:
+        ov.root.update()
+        before = ov.root.winfo_id()
+        for _ in range(6):
+            ov.text.event_generate("<Control-MouseWheel>", delta=120)
+        ov.root.update()
+        assert ov.root.winfo_id() == before, "HWND changed - exclusion would drop"
     finally:
         ov.root.destroy()
 

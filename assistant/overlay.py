@@ -31,6 +31,12 @@ _BG = "#101014"
 _FG = "#e8e8ea"
 _FONT = ("Segoe UI", 12)
 
+_GRIP = "#2a2a32"           # just visible against _BG, not attention-grabbing
+_GRIP_PX = 16
+_MIN_W, _MIN_H = 240, 120   # below this the text is unreadable and the grip
+                            # gets hard to hit, leaving no way to grow it back
+_FONT_MIN, _FONT_MAX = 8, 32
+
 
 def set_capture_excluded(root: tk.Tk, excluded: bool) -> None:
     """Raises on failure. The caller must not show the window if this raises."""
@@ -73,6 +79,11 @@ class Overlay:
         self._drag_from: tuple[int, int] | None = None
         self._make_draggable(self.text)
         self._make_draggable(self.root)
+
+        self._font_size = _FONT[1]
+        self._resize_from: tuple[int, int, int, int] | None = None
+        self._grip = self._make_resizable()
+        self._make_font_scalable()
 
         self._visible = True
         self._alive = True  # cleared on quit, so the drain stops rescheduling
@@ -136,6 +147,79 @@ class Overlay:
         widget.bind("<B1-Motion>", drag)
         widget.bind("<ButtonRelease-1>", drop)
 
+    def _make_resizable(self) -> tk.Frame:
+        """Bottom-right grip. Same reason as the drag: overrideredirect(True)
+        removes the frame, so there is no resize border and no window manager.
+
+        Every handler returns "break". Tk runs bindtags widget -> class ->
+        TOPLEVEL -> all, and <Button-1> is already bound on self.root to start
+        a drag, so without it the window resizes and slides at the same time.
+        Measured: the handlers fire ['grip', 'root'] without the break.
+        """
+        grip = tk.Frame(
+            self.root, bg=_GRIP, width=_GRIP_PX, height=_GRIP_PX,
+            cursor="size_nw_se",
+        )
+        # place(), not pack(): self.text is packed expand/fill and owns the
+        # whole cavity, so a packed grip is allocated nothing and stays
+        # unmapped at 1x1 - the exact trap that hid the query entry.
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+
+        def grab(event: "tk.Event") -> str:
+            self._resize_from = (
+                event.x_root,
+                event.y_root,
+                self.root.winfo_width(),
+                self.root.winfo_height(),
+            )
+            return "break"
+
+        def drag(event: "tk.Event") -> str:
+            if self._resize_from is None:
+                return "break"
+            px, py, w0, h0 = self._resize_from
+            width = max(_MIN_W, w0 + event.x_root - px)
+            height = max(_MIN_H, h0 + event.y_root - py)
+            # x and y are pinned: the window grows from its top-left corner
+            # rather than wandering across the screen while being resized.
+            self.root.geometry(
+                f"{width}x{height}+{self.root.winfo_x()}+{self.root.winfo_y()}"
+            )
+            return "break"
+
+        def drop(_event: "tk.Event") -> str:
+            self._resize_from = None
+            return "break"
+
+        grip.bind("<Button-1>", grab)
+        grip.bind("<B1-Motion>", drag)
+        grip.bind("<ButtonRelease-1>", drop)
+        return grip
+
+    def _make_font_scalable(self) -> None:
+        """Ctrl+wheel resizes the text. Bigger window shows more lines; this
+        is for when 12pt is simply hard to read at a glance."""
+
+        def scale(event: "tk.Event") -> str:
+            step = 1 if event.delta > 0 else -1
+            self._font_size = max(
+                _FONT_MIN, min(_FONT_MAX, self._font_size + step)
+            )
+            self._apply_font()
+            return "break"   # otherwise the Text scrolls as well
+
+        for widget in (self.root, self.text):
+            widget.bind("<Control-MouseWheel>", scale)
+
+    def _apply_font(self) -> None:
+        """The query entry is created lazily, so the current size has to live
+        on the instance rather than in _FONT - an entry opened after scaling
+        would otherwise appear at 12pt beside 20pt body text."""
+        font = (_FONT[0], self._font_size)
+        self.text.configure(font=font)
+        if self._entry is not None:
+            self._entry.configure(font=font)
+
     def _write(self, chunk: str) -> None:
         self.text.configure(state="normal")
         self.text.insert("end", chunk)
@@ -163,7 +247,7 @@ class Overlay:
             bg=_BG,
             fg=_FG,
             insertbackground=_FG,
-            font=_FONT,
+            font=(_FONT[0], self._font_size),
             borderwidth=0,
             highlightthickness=0,
         )

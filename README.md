@@ -34,6 +34,8 @@ Missing `ANTHROPIC_API_KEY` will fail immediately on startup with a clear error.
 | `Ctrl+Alt+Space` | Read the screen and answer what's on it, in code |
 | `Ctrl+Alt+H` | Hide or show the overlay |
 | drag the box | Move it — there is no titlebar to grab |
+| drag the corner grip | Resize it — the small square, bottom right |
+| `Ctrl` + scroll wheel | Bigger or smaller text, 8pt to 32pt |
 | `Ctrl+Alt+Q` | Quit |
 
 ## Screen mode
@@ -71,6 +73,9 @@ Everything adjustable is in `assistant/config.py`.
 - Want lower latency at some CPU cost: lower `GATE_POLL_S`
 - Debugging the overlay: `EXCLUDE_FROM_CAPTURE = False`, because you cannot
   screenshot the overlay while exclusion is on
+- Overlay too small or text too fine: drag the corner grip, or `Ctrl`+scroll.
+  Neither persists across restarts — change `geometry(...)` and `_FONT` in
+  `assistant/overlay.py` to move the defaults
 - Got fast-mode access: `FAST_MODE = True`. It is off by default because
   without the entitlement every request fails with `rate limit of 0 fast mode
   input tokens per minute` — unusable, not just slower
