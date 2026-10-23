@@ -41,13 +41,12 @@ EXCLUDE_FROM_CAPTURE = True
 # False if a real interview pad ever reads worse.
 SCREEN_HALF_RES = True
 
-# Fast mode is a research preview and needs the org to be allowlisted for it.
-# Without that entitlement EVERY request 429s with "rate limit of 0 fast mode
-# input tokens per minute" - the app is unusable rather than merely slower, so
-# this defaults off. Turn it on if you get access: it buys up to 2.5x output
-# tokens/sec, which is the difference between reading a cue card mid-sentence
-# and after it.
-FAST_MODE = False
+# Fast mode on Opus 5.5, measured 2026-10-22 (same question, 5 runs each,
+# alternating): full answer 2.9s on Opus 5 -> 1.5s, first word 0.5s -> 0.9s,
+# about $0.014 a press against $0.005. Opus 5 fast once had a zero quota on
+# this org and 429'd every request; answer.py now drops to standard speed on
+# any fast-mode failure instead of showing an error. False to halve the cost.
+FAST_MODE = True
 
 
 def api_key() -> str:

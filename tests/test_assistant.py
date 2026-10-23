@@ -158,7 +158,7 @@ def test_transcript_is_a_single_block():
     assert len(req["messages"][0]["content"]) == 2
 
 
-def test_request_omits_the_parameters_that_400_on_opus_5():
+def test_request_omits_the_parameters_that_400_on_opus_5_5():
     req = answer.build_request("t", "tail")
     for banned in ("temperature", "top_p", "top_k", "thinking"):
         assert banned not in req
@@ -166,19 +166,34 @@ def test_request_omits_the_parameters_that_400_on_opus_5():
 
 def test_request_pins_the_model_and_effort():
     req = answer.build_request("t", "tail")
-    assert req["model"] == "claude-opus-5"
+    assert req["model"] == "claude-opus-5-5"
     assert req["output_config"] == {"effort": "low"}
     assert req["max_tokens"] == 2000
 
 
-def test_fast_mode_is_off_by_default_and_absent_from_the_request(monkeypatch):
-    # Measured against the live API: without the org entitlement every request
-    # 429s with "rate limit of 0 fast mode input tokens per minute", so the app
-    # is unusable rather than merely slower. Off unless explicitly enabled.
+def test_fast_mode_is_on_by_default():
+    # Measured 2026-10-22: Opus 5.5 fast mode is entitled on this org and halves
+    # the full answer (2.9s -> 1.5s median). Opus 5 fast had a zero quota.
+    req = answer.build_request("t", "tail")
+    assert req["speed"] == "fast"
+    assert "fast-mode-2026-02-01" in req["betas"]
+
+
+def test_fast_mode_off_leaves_no_fast_parameters(monkeypatch):
     monkeypatch.setattr(config, "FAST_MODE", False)
     req = answer.build_request("t", "tail")
     assert "speed" not in req
-    assert "betas" not in req
+    assert "fast-mode-2026-02-01" not in req["betas"]
+
+
+@pytest.mark.parametrize("fast", [True, False])
+def test_refusal_fallback_is_always_requested_with_its_beta(monkeypatch, fast):
+    # The "default" scalar form needs exactly this header; the -06-01 header
+    # gates the array form and 400s here.
+    monkeypatch.setattr(config, "FAST_MODE", fast)
+    req = answer.build_request("t", "tail")
+    assert req["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in req["betas"]
 
 
 def test_fast_mode_when_enabled_sends_the_speed_and_the_beta_together(monkeypatch):
@@ -187,7 +202,7 @@ def test_fast_mode_when_enabled_sends_the_speed_and_the_beta_together(monkeypatc
     monkeypatch.setattr(config, "FAST_MODE", True)
     req = answer.build_request("t", "tail")
     assert req["speed"] == "fast"
-    assert req["betas"] == ["fast-mode-2026-02-01"]
+    assert "fast-mode-2026-02-01" in req["betas"]
 
 
 def test_query_tail_embeds_the_typed_question():
@@ -442,7 +457,7 @@ def test_grab_on_a_single_monitor_returns_one_image(monkeypatch):
 
 
 def test_code_prompt_clears_the_512_token_cache_floor():
-    # The silent failure this whole file already documents once: below Opus 5's
+    # The silent failure this whole file already documents once: below Opus 5.5's
     # 512-token minimum the block stops caching with no error and
     # cache_creation_input_tokens: 0. A characters/3.6 estimate was measured
     # 45% wrong on SYSTEM, so this counts for real rather than estimating.
@@ -455,7 +470,7 @@ def test_code_prompt_clears_the_512_token_cache_floor():
 
     client = anthropic.Anthropic(api_key=config.api_key())
     count = client.messages.count_tokens(
-        model="claude-opus-5",
+        model="claude-opus-5-5",
         system=[{"type": "text", "text": prompts.CODE_SYSTEM}],
         messages=[{"role": "user", "content": "x"}],
     ).input_tokens
@@ -487,6 +502,9 @@ def test_api_key_never_reaches_the_log_or_the_ui(monkeypatch, caplog):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-canary-value")
 
     class Boom:
+        def with_options(self, **kw):
+            return self
+
         class beta:
             class messages:
                 @staticmethod
@@ -654,3 +672,134 @@ def test_the_claim_is_dropped_on_release(monkeypatch):
         assert single_instance.acquire() is True, "the name stayed claimed after release"
     finally:
         single_instance.release()
+
+
+class _FakeStream:
+    def __init__(self, tokens, stop="end_turn"):
+        self.text_stream = iter(tokens)
+        self._stop = stop
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        usage = NamedTuple("U", [("cache_read_input_tokens", int),
+                                 ("cache_creation_input_tokens", int),
+                                 ("input_tokens", int), ("output_tokens", int)])(0, 0, 0, 0)
+        return NamedTuple("M", [("usage", object), ("stop_reason", str),
+                                ("stop_details", object)])(usage, self._stop, None)
+
+
+def _api_error(kind):
+    import anthropic
+    import httpx
+
+    request = httpx.Request("POST", "https://x/v1/messages")
+
+    def status(cls, code, msg):
+        return cls(msg, response=httpx.Response(code, request=request), body=None)
+
+    return {
+        "429": lambda: status(anthropic.RateLimitError, 429, "rate limit of 0 fast mode"),
+        "403": lambda: status(anthropic.PermissionDeniedError, 403, "no fast mode"),
+        "529": lambda: status(anthropic.OverloadedError, 529, "overloaded"),
+        "conn": lambda: anthropic.APIConnectionError(request=request),
+        # An SSE error event arrives on an HTTP 200, after tokens have shown.
+        "midstream": lambda: status(anthropic.APIStatusError, 200, "overloaded"),
+    }[kind]()
+
+
+class _FailingFastClient:
+    """Fails every fast request with `kind`, streams normally otherwise."""
+
+    def __init__(self, kind):
+        self.requests = []
+        self.retry_options = []
+        client = self
+
+        def partial_then_fail():
+            yield "- fast partial"
+            raise _api_error(kind)
+
+        class _Messages:
+            @staticmethod
+            def stream(**req):
+                client.requests.append(req)
+                if req.get("speed") != "fast":
+                    return _FakeStream(["- standard", " speed"])
+                if kind == "midstream":
+                    return _FakeStream(partial_then_fail())
+                raise _api_error(kind)
+
+        self.beta = type("B", (), {"messages": _Messages})
+
+    def with_options(self, **kw):
+        self.retry_options.append(kw)
+        return self
+
+
+def _shown(items):
+    """What the card shows: the tokens after the last clear."""
+    last_clear = max(i for i, item in enumerate(items) if item[0] == "clear")
+    return "".join(t for kind, t in items[last_clear:] if kind == "token")
+
+
+@pytest.mark.parametrize("kind", ["429", "403", "529", "conn", "midstream"])
+def test_any_fast_mode_failure_falls_back_to_standard_speed(monkeypatch, kind):
+    # SDK retries are off on the fast attempt, so an overload or a dropped
+    # connection must fall back too, or it is worse than having no fast mode.
+    monkeypatch.setattr(config, "FAST_MODE", True)
+    client = _FailingFastClient(kind)
+    q = _FakeQueue()
+    answer.stream_answer(client, "[them] hi", "tail", q)
+
+    assert _shown(q.items) == "- standard speed"
+    assert q.items[-1] == ("done", None)
+    assert len(client.requests) == 2
+    retry = client.requests[1]
+    assert "speed" not in retry
+    assert "fast-mode-2026-02-01" not in retry["betas"]
+    # The refusal fallback survives the downgrade.
+    assert retry["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in retry["betas"]
+    # No SDK retry loop on the fast pool: a zero quota would sit out its
+    # retry-after before the fallback ever ran.
+    assert client.retry_options == [{"max_retries": 0}]
+
+
+@pytest.mark.parametrize(
+    "kind, sticks", [("429", True), ("403", True), ("529", False),
+                     ("conn", False), ("midstream", False)]
+)
+def test_only_a_fast_mode_4xx_stops_asking_for_fast(monkeypatch, kind, sticks):
+    # A 4xx means no entitlement or no quota: asking every press only adds a
+    # doomed round trip. A 5xx or a dropped connection may pass.
+    monkeypatch.setattr(config, "FAST_MODE", True)
+    client = _FailingFastClient(kind)
+    answer.stream_answer(client, "[them] hi", "tail", _FakeQueue())
+    client.requests.clear()
+
+    answer.stream_answer(client, "[them] hi", "tail", _FakeQueue())
+    tried_fast = client.requests[0].get("speed") == "fast"
+    assert tried_fast is not sticks
+
+
+def test_a_refused_answer_says_so_instead_of_leaving_a_blank_card():
+    class Refusing:
+        def with_options(self, **kw):
+            return self
+
+        class beta:
+            class messages:
+                @staticmethod
+                def stream(**kw):
+                    return _FakeStream([], stop="refusal")
+
+    q = _FakeQueue()
+    answer.stream_answer(Refusing(), "[them] hi", "tail", q)
+    # Own line: a refusal can land after part of the answer has streamed.
+    assert ("token", "\n[declined]") in q.items
+    assert q.items[-1] == ("done", None)

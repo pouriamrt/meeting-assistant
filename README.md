@@ -40,9 +40,9 @@ screenshot when you ask for one.
 |:---|:---|
 | **Hears** | Your microphone and the system output, as two separate streams |
 | **Transcribes** | `faster-whisper base.en`, locally, on 4 CPU threads |
-| **Answers** | `claude-opus-5`, streamed token by token |
+| **Answers** | `claude-opus-5-5` in fast mode, streamed token by token |
 | **Shows** | A borderless overlay that `WDA_EXCLUDEFROMCAPTURE` keeps out of screen shares |
-| **Costs** | About $0.010 per screen-mode press |
+| **Costs** | About $0.014 per answer, $0.05 per screen-mode press on two monitors |
 
 ## Requirements
 
@@ -113,7 +113,7 @@ flowchart TB
     TR --> REQ
     SHOT --> REQ
     subgraph remote["Leaves the machine"]
-        REQ["Text and PNGs"] --> API["claude-opus-5<br/>streaming"]
+        REQ["Text and PNGs"] --> API["claude-opus-5-5 fast<br/>streaming"]
     end
     API --> OV["Overlay<br/>excluded from capture"]
 
@@ -199,9 +199,8 @@ faster than both half-res runs. Legibility was tested rather than assumed: at
 half resolution the model still transcribed a 14pt IDE-font stub correctly. Set
 it `False` if a real pad ever reads worse.
 
-There is no large speed win available here. Output dominates, a screen answer is
-typically 3 to 4 seconds end to end, and the one real lever is `FAST_MODE`,
-which needs an entitlement this account does not have.
+Output dominates, so the one real speed lever is `FAST_MODE`, now on. Measured
+on two monitors with it on, a screen answer takes 2.4 to 3.0 seconds end to end.
 
 ## The overlay
 
@@ -262,7 +261,7 @@ Everything adjustable is in `assistant/config.py`.
 | Want lower latency, at some CPU cost | Lower `GATE_POLL_S` |
 | Screenshots reading badly | `SCREEN_HALF_RES = False` |
 | Debugging the overlay | `EXCLUDE_FROM_CAPTURE = False` |
-| Got fast-mode access | `FAST_MODE = True` |
+| Answers cost too much | `FAST_MODE = False` |
 
 Reach for `SILENCE_END_MS` first if it keeps interrupting you. At 700ms a
 natural pause mid-question splits one question into two turns.
@@ -272,9 +271,13 @@ natural pause mid-question splits one question into two turns.
 
 <br>
 
-`FAST_MODE` is off by default because without the entitlement every request
-fails with `rate limit of 0 fast mode input tokens per minute`. That is
-unusable, not merely slower.
+`FAST_MODE` is on, and it is the only reason Opus 5.5 is the faster model
+here. Without it Opus 5.5 is slower than Opus 5: it cannot skip thinking, so
+the first word takes about 2.4s instead of 0.5s. Fast mode halves the full
+answer (2.9s to 1.5s) at about three times the cost per press. If a fast
+request fails for any reason, the same press is answered at standard speed
+instead of showing an error. If the account has no fast-mode access at all,
+the first refusal switches fast mode off until the app restarts.
 
 </details>
 

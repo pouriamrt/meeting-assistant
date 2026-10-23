@@ -209,14 +209,14 @@ Also costs money, though `count_tokens` is cheap.
     from assistant import prompts, config
     c = anthropic.Anthropic(api_key=config.api_key())
     r = c.messages.count_tokens(
-        model='claude-opus-5',
+        model='claude-opus-5-5',
         system=[{'type': 'text', 'text': prompts.SYSTEM}],
         messages=[{'role': 'user', 'content': 'x'}],
     )
     print(r)
     "
 
-**Expect:** comfortably above 512. Opus 5 will not cache a prefix below that, and it
+**Expect:** comfortably above 512. Opus 5.5 will not cache a prefix below that, and it
 fails silently — no error, just no caching.
 
 `ASSISTANT_NAME` is substituted into `SYSTEM` at two sites, so re-run this with the

@@ -24,6 +24,13 @@ class Emitter(Protocol):
     def put(self, item: tuple) -> None: ...
 
 _CACHE = {"type": "ephemeral", "ttl": "1h"}
+_FAST_BETA = "fast-mode-2026-02-01"
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"  # "default" form; -06-01 400s
+
+# Set once the fast pool answers with a 4xx, then every press skips straight to
+# standard speed. Written from answer threads without a lock: the worst a race
+# costs is one extra fast attempt.
+_fast_refused = False
 
 
 def build_request(
@@ -47,8 +54,8 @@ def build_request(
     CODE_SYSTEM writes code. It defaults inside the body rather than in the
     signature so the default stays a live reference to the module constant.
 
-    No temperature, top_p, top_k, or thinking key: the first three are a 400 on
-    Opus 5, and disabling thinking leaks <thinking> tags into visible output.
+    No temperature, top_p, top_k, or thinking key: the first three 400 on every
+    model since 2026-10-21, and Opus 5.5 rejects disabled thinking outright.
     max_tokens covers thinking plus text together, so it is sized well above
     the four bullets the prompt asks for.
     """
@@ -74,7 +81,10 @@ def build_request(
     content.append({"type": "text", "text": tail})
 
     req: dict = {
-        "model": "claude-opus-5",
+        # Plain Opus 5.5 is SLOWER here: thinking cannot be turned off, so even
+        # at low effort it reasons before the first word (TTFT 2.4s vs Opus 5's
+        # 0.5s, measured). Fast mode is what makes 5.5 the faster choice.
+        "model": "claude-opus-5-5",
         "max_tokens": 2000,
         "output_config": {"effort": "low"},
         "system": [
@@ -85,11 +95,52 @@ def build_request(
             }
         ],
         "messages": [{"role": "user", "content": content}],
+        # A classifier decline is otherwise an empty card mid-interview; this
+        # re-runs it server-side on the model Anthropic routes that category to.
+        "fallbacks": "default",
+        "betas": [_FALLBACK_BETA],
     }
     if config.FAST_MODE:
         req["speed"] = "fast"
-        req["betas"] = ["fast-mode-2026-02-01"]
+        req["betas"] = [_FAST_BETA, _FALLBACK_BETA]
     return req
+
+
+def _standard_speed(req: dict) -> dict:
+    """The same request without fast mode, refusal fallback kept."""
+    slow = {k: v for k, v in req.items() if k != "speed"}
+    slow["betas"] = [b for b in req["betas"] if b != _FAST_BETA]
+    return slow
+
+
+def _stream(client: "anthropic.Anthropic", req: dict, ui_queue: Emitter):
+    with client.beta.messages.stream(**req) as stream:
+        for text in stream.text_stream:
+            ui_queue.put(("token", text))
+        return stream.get_final_message()
+
+
+def _answer(client: "anthropic.Anthropic", req: dict, ui_queue: Emitter):
+    """Stream fast when asked, at standard speed if the fast attempt fails."""
+    global _fast_refused
+    if "speed" not in req or _fast_refused:
+        return _stream(client, _standard_speed(req), ui_queue)
+    try:
+        # No SDK retries on the fast pool: a zero quota would sit out its
+        # retry-after before the standard-speed answer could start.
+        return _stream(client.with_options(max_retries=0), req, ui_queue)
+    except anthropic.APIError as exc:
+        # Any failure, not just a 429: with retries off, an overload or a
+        # dropped connection would otherwise go straight to an error card.
+        # Only a 4xx sticks - no entitlement or no quota will not fix itself
+        # mid-session. A mid-stream error event arrives on an HTTP 200, so the
+        # range is bounded below too.
+        if isinstance(exc, anthropic.APIStatusError) and 400 <= exc.status_code < 500:
+            _fast_refused = True
+        log.warning("fast mode failed (%s), answering at standard speed",
+                    type(exc).__name__)
+        ui_queue.put(("clear", None))
+        return _stream(client, _standard_speed(req), ui_queue)
 
 
 def stream_answer(
@@ -101,20 +152,21 @@ def stream_answer(
     system: str | None = None,
 ) -> None:
     """Stream one answer onto the UI queue. Runs on its own thread per press."""
+    req = build_request(transcript_text, tail, images, system)
     ui_queue.put(("clear", None))
     try:
-        with client.beta.messages.stream(
-            **build_request(transcript_text, tail, images, system)
-        ) as stream:
-            for text in stream.text_stream:
-                ui_queue.put(("token", text))
-            final = stream.get_final_message()
+        final = _answer(client, req, ui_queue)
     except Exception as exc:                     # surface it, never swallow it
         log.exception("answer failed")
         ui_queue.put(("token", f"\n[error: {type(exc).__name__}]"))
         ui_queue.put(("done", None))
         return
 
+    if final.stop_reason == "refusal":
+        # Every model in the fallback chain declined. A blank card reads as a
+        # dead app, so say so.
+        log.warning("answer declined: %s", final.stop_details)
+        ui_queue.put(("token", "\n[declined]"))
     ui_queue.put(("done", None))
 
     # A cache miss is invisible in the output and costs 10x. Only the system

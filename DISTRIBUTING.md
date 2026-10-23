@@ -25,7 +25,7 @@ nobody is standing behind it either.
    anyway", or don't, if you would rather not.
 3. It asks once for an Anthropic API key. Get one at
    <https://console.anthropic.com>. Answers are billed to that key, roughly
-   $0.03 a press.
+   $0.014 a press, about $0.05 when it reads the screen.
 4. First launch downloads a speech model, about 141 MB, once. It needs internet
    for that and says so while it happens.
 5. **Use headphones.** On speakers the microphone hears the other person coming
